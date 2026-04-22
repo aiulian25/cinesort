@@ -1,0 +1,60 @@
+# Development files
+.git
+.gitignore
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv/
+ENV/
+env/
+
+# Build outputs
+build/
+dist/
+*.egg-info
+node_modules/
+
+# Electron files (not needed for Docker)
+electron/
+
+# Distribution files
+*.deb
+*.AppImage
+*.rpm
+
+# Documentation and plans
+*.md
+!README-DOCKER.md
+LICENSE
+
+# Test and media files
+test_media/
+extracted/
+decompiled/
+META-INF/
+net/
+
+# Packaging files
+package.json
+package-lock.json
+
+# Logs and temp files
+*.log
+*.pid
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.editorconfig
+.eslintrc*
+.prettierrc*

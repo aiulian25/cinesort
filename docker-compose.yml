@@ -1,0 +1,59 @@
+services:
+  cinesort:
+    image: aiulian25/cinesort:latest
+    container_name: cinesort
+    ports:
+      - "8888:8888"
+    environment:
+      # User/Group IDs for file permissions (match your host user)
+      # Run 'id -u' and 'id -g' on your host to get your IDs
+      - PUID=1000
+      - PGID=1000
+      
+      # Optional: Custom TMDb API key (get yours at https://www.themoviedb.org/settings/api)
+      # If you set this, the default embedded key will NOT be used as fallback
+      # Leave commented to use the default key (for testing only)
+      # - TMDB_API_KEY=your_tmdb_api_key_here
+      
+      # Server configuration (usually no need to change these)
+      - CINESORT_HOST=0.0.0.0
+      - CINESORT_PORT=8888
+    
+    volumes:
+      # Persistent data (history, config)
+      - cinesort-data:/data
+      
+      # Media directories - CHANGE THESE to match your system!
+      # Example: Mount your movies and TV shows directories
+      # Single directory:
+      - /path/to/your/media:/media
+      
+      # Or mount multiple specific directories:
+      # - /path/to/movies:/media/movies
+      # - /path/to/tv:/media/tv
+      # - /path/to/downloads:/media/downloads
+      
+      # For network mounts (NFS/SMB), add :rw flag:
+      # - /mnt/nas:/media:rw
+    
+    restart: unless-stopped
+    
+    # Optional: Resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 1G
+    #     reservations:
+    #       memory: 256M
+    
+    # Optional: Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  cinesort-data:
+    driver: local

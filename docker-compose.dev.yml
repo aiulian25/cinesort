@@ -1,0 +1,26 @@
+# Docker Compose for local development/building
+# Use this if you want to build the image locally instead of pulling from Docker Hub
+
+services:
+  cinesort:
+    image: cinesort:latest
+    container_name: cinesort
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8888:8888"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      # - TMDB_API_KEY=your_tmdb_api_key_here
+      - CINESORT_HOST=0.0.0.0
+      - CINESORT_PORT=8888
+    volumes:
+      - cinesort-data:/data
+      - /path/to/your/media:/media
+    restart: unless-stopped
+
+volumes:
+  cinesort-data:
+    driver: local

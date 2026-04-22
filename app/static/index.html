@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CineSort - Media Organizer</title>
+    <link rel="icon" type="image/png" href="/CineSort.png">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Background -->
+    <div class="bg-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <div class="app">
+        <!-- ═══ Top Bar ═══ -->
+        <header class="glass-panel topbar">
+            <div class="topbar-left">
+                <img src="/CineSort.png" alt="CineSort" class="logo-icon" width="28" height="28" style="border-radius:6px">
+                <span class="topbar-title">CineSort</span>
+            </div>
+            <div class="topbar-center">
+                <div class="toolbar">
+                    <div class="toolbar-group">
+                        <label class="toolbar-label">Source</label>
+                        <select id="datasource" class="glass-select">
+                            <option value="tmdb">TMDb</option>
+                            <option value="tvmaze">TVmaze</option>
+                        </select>
+                    </div>
+                    <div class="toolbar-group">
+                        <label class="toolbar-label">Action</label>
+                        <select id="action" class="glass-select">
+                            <option value="test">Test (Dry Run)</option>
+                            <option value="move">Move</option>
+                            <option value="copy">Copy</option>
+                            <option value="hardlink">Hard Link</option>
+                            <option value="symlink">Symlink</option>
+                        </select>
+                    </div>
+                    <div class="toolbar-group template-group">
+                        <label class="toolbar-label">Template</label>
+                        <input type="text" id="template" class="glass-input mono"
+                               value="{n}/Season {s}/{n} - {s00e00} - {t}" spellcheck="false">
+                        <div class="template-presets">
+                            <button class="preset-btn" data-template="{n}/Season {s}/{n} - {s00e00} - {t}" title="TV Series">TV</button>
+                            <button class="preset-btn" data-template="{n} ({y})/{n} ({y})" title="Movie">Film</button>
+                            <button class="preset-btn" data-template="{n}/{n} - {absolute} - {t}" title="Anime">Anime</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <button id="btn-history" class="glass-btn" title="View rename history">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
+                    History
+                </button>
+                <button id="btn-rename" class="glass-btn btn-rename" disabled>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+                    Rename
+                </button>
+            </div>
+        </header>
+
+        <!-- ═══ Scan Bar ═══ -->
+        <div class="glass-panel scanbar">
+            <svg class="scanbar-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            <input type="text" id="scan-path" class="scanbar-input" placeholder="Enter folder path or drag &amp; drop files here…" spellcheck="false">
+            <button id="btn-browse" class="glass-btn" title="Browse server folders">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                    <circle cx="12" cy="13" r="2"/>
+                </svg>
+                Browse
+            </button>
+            <label class="cb-label"><input type="checkbox" id="recursive" checked><span>Recursive</span></label>
+            <button id="btn-scan" class="glass-btn btn-scan">Scan</button>
+            <button id="btn-match" class="glass-btn btn-match" disabled>Match</button>
+        </div>
+
+        <!-- ═══ Status ═══ -->
+        <div id="status-bar" class="statusbar hidden">
+            <span id="status-text"></span>
+            <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        </div>
+
+        <!-- ═══ Dual-pane Match Area ═══ -->
+        <div class="dual-pane" id="dual-pane">
+
+            <!-- LEFT: Original Files -->
+            <div class="pane pane-left glass-panel" id="pane-left">
+                <div class="pane-header">
+                    <span class="pane-title">Original Files</span>
+                    <span class="pane-count" id="left-count">0</span>
+                </div>
+                <div class="pane-list" id="left-list">
+                    <div class="drop-zone active" id="drop-zone">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.25">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <p>Drop media files here</p>
+                        <p class="drop-hint">or enter a folder path above and click Scan</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CENTER: Arrow gutter -->
+            <div class="gutter" id="gutter"></div>
+
+            <!-- RIGHT: New Names -->
+            <div class="pane pane-right glass-panel" id="pane-right">
+                <div class="pane-header">
+                    <span class="pane-title">New Names</span>
+                    <span class="pane-count" id="right-count">0</span>
+                </div>
+                <div class="pane-list" id="right-list">
+                    <div class="empty-right">
+                        <p>Click <strong>Match</strong> to look up metadata</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ Modal ═══ -->
+    <div class="modal-overlay hidden" id="modal-overlay">
+        <div class="glass-panel modal">
+            <div class="modal-header">
+                <h2 id="modal-title">Results</h2>
+                <button class="modal-x" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

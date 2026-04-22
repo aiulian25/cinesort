@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Node.js
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Build artifacts (not needed for Docker deployment)
+dist/
+build/
+*.deb
+*.AppImage
+extracted/
+decompiled/
+tools/
+electron/
+META-INF/
+net/
+
+# Node.js files
+package.json
+package-lock.json
+
+# Icons (app icon in app/ is enough)
+icon.png
+
+# Testing
+test_media/
+*.log
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker
+docker-compose.override.yml
+
+# Environment files
+.env
+.env.local
+*.env
+
+# Internal documentation (removed from public repo)
+DOCKER_BUILD_PLAN.md
+DOCKER_SUMMARY.md
+DOCKER_COMPARISON.md
+
+# OS
+Thumbs.db
+.Spotlight-V100
+.Trashes

@@ -15,7 +15,7 @@ from pydantic import BaseModel, field_validator
 
 from app.core.detector import (
     detect, MediaType, is_video_file, is_subtitle_file,
-    VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS,
+    VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, extract_subtitle_lang_tag,
 )
 from app.core.matcher import cascade_score, name_similarity
 from app.core.formatter import apply_template, build_new_path, TEMPLATES, sanitize_filename
@@ -27,7 +27,7 @@ from datetime import datetime
 import uuid
 
 
-app = FastAPI(title="CineSort", version="1.0.0")
+app = FastAPI(title="CineSort", version="1.2.0")
 
 # Serve static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -301,13 +301,23 @@ async def match_files(req: MatchRequest):
 
     results = []
 
-    # Group files by detected name
-    groups: dict[str, list[dict]] = {}
+    # Split subtitle files out — they are not matched independently.
+    # They will be paired with their companion video file at the end.
+    subtitle_files: list[dict] = []
+    video_files: list[dict] = []
     for f in req.files:
+        if Path(f["path"]).suffix.lower() in SUBTITLE_EXTENSIONS:
+            subtitle_files.append(f)
+        else:
+            video_files.append(f)
+
+    # Group VIDEO files only by detected name
+    groups: dict[str, list[dict]] = {}
+    for f in video_files:
         key = f.get("clean_name", "unknown")
         groups.setdefault(key, []).append(f)
 
-    print(f"[DEBUG] Grouped {len(req.files)} files into {len(groups)} groups")
+    print(f"[DEBUG] Grouped {len(video_files)} video files into {len(groups)} groups; {len(subtitle_files)} subtitle(s) held for companion pairing")
     for group_name, group_files in groups.items():
         print(f"[DEBUG] Processing group: '{group_name}' ({len(group_files)} files)")
         sample = group_files[0]
@@ -531,6 +541,59 @@ async def match_files(req: MatchRequest):
                     "matched": False,
                     "metadata": None,
                 })
+
+    # ── Subtitle companion pairing ─────────────────────────────────────────
+    # Build a lookup from each matched video's original stem → its new_path stem.
+    # A subtitle companion is identified by sharing the same stem (ignoring any
+    # trailing language tag such as ".en" or ".forced.en").
+    video_stem_map: dict[str, dict] = {}
+    for r in results:
+        if r.get("matched") and r.get("new_path"):
+            orig_stem = Path(r["original"]).stem.lower()
+            video_stem_map[orig_stem] = r
+
+    for sf in subtitle_files:
+        sub_path = Path(sf["path"])
+        sub_ext = sub_path.suffix.lower()
+        lang_tag = extract_subtitle_lang_tag(sub_path)
+        # The "clean" stem is the subtitle stem with the lang tag stripped
+        sub_stem_full = sub_path.stem  # e.g. "Show.S01E01.en"
+        if lang_tag:
+            # strip the lang tag suffix from the stem
+            clean_stem = sub_stem_full[: len(sub_stem_full) - len(lang_tag)]
+        else:
+            clean_stem = sub_stem_full
+
+        companion = video_stem_map.get(clean_stem.lower())
+
+        if companion:
+            # Derive new subtitle path from the companion video's new_path
+            companion_new = Path(companion["new_path"])
+            new_sub_name = companion_new.stem + lang_tag + sub_ext
+            new_sub_path = companion_new.parent / new_sub_name
+            results.append({
+                "original": sf["path"],
+                "filename": sf["filename"],
+                "new_path": str(new_sub_path),
+                "new_name": new_sub_name,
+                "preview": new_sub_name,
+                "score": companion["score"],
+                "matched": True,
+                "metadata": companion.get("metadata"),
+                "is_subtitle": True,
+            })
+        else:
+            # No companion video matched — skip (do not rename)
+            results.append({
+                "original": sf["path"],
+                "filename": sf["filename"],
+                "new_path": None,
+                "new_name": None,
+                "preview": None,
+                "score": 0,
+                "matched": False,
+                "is_subtitle": True,
+            })
 
     # Detect conflicts
     conflicts = []

@@ -45,7 +45,25 @@ VIDEO_EXTENSIONS = {
     ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx", ".ogm", ".rmvb",
 }
 
-SUBTITLE_EXTENSIONS = {".srt", ".sub", ".ass", ".ssa", ".idx", ".sup"}
+SUBTITLE_EXTENSIONS = {".srt", ".sub", ".ass", ".ssa", ".idx", ".sup", ".vtt"}
+
+# Language tag patterns found between the episode stem and the subtitle extension
+# e.g. Show.S01E01.en.srt, Show.S01E01.forced.en.srt, Show.S01E01.ro.hi.srt
+_LANG_TAG_RE = re.compile(
+    r'(?P<lang>(?:\.(?:forced|sdh|hi|cc))*(?:\.[a-z]{2,3}(?:-[A-Za-z]{2,4})?)(?:\.(?:forced|sdh|hi|cc))*)+$',
+    re.IGNORECASE,
+)
+
+
+def extract_subtitle_lang_tag(path: Path) -> str:
+    """Return the language/flag suffix found before the extension, or empty string.
+    E.g. 'Show.S01E01.en.srt' → '.en'
+         'Show.S01E01.forced.en.srt' → '.forced.en'
+         'Show.S01E01.mkv' → ''
+    """
+    stem = path.stem  # everything before the last dot
+    m = _LANG_TAG_RE.search(stem)
+    return m.group("lang") if m else ""
 
 AUDIO_EXTENSIONS = {
     ".mp3", ".flac", ".aac", ".ogg", ".opus", ".wma", ".wav",

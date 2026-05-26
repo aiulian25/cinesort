@@ -1,0 +1,58 @@
+{
+  "name": "cinesort",
+  "version": "1.2.0",
+  "description": "CineSort - Professional media file organizer with smart metadata matching",
+  "main": "electron/main.js",
+  "author": {
+    "name": "CineSort",
+    "email": "app@cinesort.local"
+  },
+  "homepage": "https://github.com/cinesort/cinesort",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.cinesort.app",
+    "productName": "CineSort",
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb",      "arch": ["x64"] }
+      ],
+      "icon": "build/icons",
+      "synopsis": "Professional media file organizer",
+      "description": "CineSort - Smart media file renaming with TMDb and TVmaze integration",
+      "category": "AudioVideo",
+      "desktop": {
+        "Comment": "Professional media file organizer",
+        "Categories": "AudioVideo;Video;Utility;",
+        "StartupWMClass": "CineSort",
+        "StartupNotify": "true"
+      }
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0", "libnotify4", "libnss3",
+        "libxss1", "libxtst6", "xdg-utils",
+        "libatspi2.0-0", "libuuid1"
+      ],
+      "afterInstall": "build/postinst.sh",
+      "afterRemove": "build/postrm.sh"
+    },
+    "files": [
+      "electron/**/*",
+      "app/**/*",
+      "!app/__pycache__/**",
+      "!**/*.pyc"
+    ],
+    "extraResources": [
+      { "from": ".venv", "to": "venv", "filter": ["**/*"] }
+    ],
+    "asar": false
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}

@@ -7,6 +7,7 @@ CineSort automatically detects, matches, and renames your movies and TV shows us
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
+![Version](https://img.shields.io/badge/version-1.1.0-green.svg)
 
 ---
 
@@ -15,13 +16,16 @@ CineSort automatically detects, matches, and renames your movies and TV shows us
 - 🎯 **Smart Detection** - Automatically detects movies and TV shows from filenames
 - 🔍 **Metadata Matching** - Fetches accurate metadata from TMDb and TVMaze
 - 📝 **Flexible Renaming** - Multiple naming templates (Plex, Jellyfin, Emby, custom)
+- ✏️ **Rename In-Place** - Rename files without moving them — works on NAS/SMB shares
 - 📁 **Folder Browser** - Server-side folder navigation with multi-select support
 - ✅ **Batch Operations** - Select multiple files with checkboxes or Ctrl+A
+- 🗑️ **Per-file Removal** - Remove individual files from the list with DEL key or right-click
 - 📊 **Rename History** - Track all rename operations with undo support
-- 🎨 **Modern Web UI** - Beautiful glassmorphic dark theme
+- 🎨 **Modern Web UI** - Beautiful glassmorphic dark theme with action hint banners
 - 🐳 **Docker Native** - 180MB image, runs anywhere
 - 🔒 **Secure** - Runs as non-root user with configurable PUID/PGID
 - 🆓 **Free APIs** - No registration required (optional TMDb API key for heavy use)
+- 🌐 **NAS/SMB Ready** - Actionable error messages for network mount limitations
 
 ---
 
@@ -379,7 +383,21 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 ---
 
-## 🙏 Acknowledgments
+## � Changelog
+
+### v1.1.0
+- **Rename In-Place action** — renames files using an atomic OS rename, keeping them in their current folder. No new directories are ever created. Works on SMB/NFS/NAS mounts.
+- **Per-file removal** — remove individual files from the scan list with the `Del` key or right-click → "Remove from list". Arrow keys navigate between rows.
+- **Action hint banner** — colour-coded description of what each action (Rename, Move, Copy, etc.) will do before you commit.
+- **Flat template preset** — one-click preset with no path separators, safe for in-place renaming.
+- **Improved SMB error handling** — `EOPNOTSUPP`, `EXDEV`, `EACCES`, `ENOSPC` now surface as clear, actionable messages instead of raw Python tracebacks.
+
+### v1.0.0
+- Initial public release
+
+---
+
+## �🙏 Acknowledgments
 
 - **TMDb** - Movie and TV metadata (https://www.themoviedb.org/)
 - **TVMaze** - TV show information (https://www.tvmaze.com/)

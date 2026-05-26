@@ -57,8 +57,17 @@ docker-compose.override.yml
 DOCKER_BUILD_PLAN.md
 DOCKER_SUMMARY.md
 DOCKER_COMPARISON.md
+DEPLOYMENT.md
 
 # OS
 Thumbs.db
 .Spotlight-V100
 .Trashes
+
+# Backups (never commit backups)
+backup/
+backups/
+*.backup
+*.bak
+*.tar.gz
+*.zip

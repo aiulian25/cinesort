@@ -13,6 +13,7 @@ let selectedSet = new Set(); // indices in scannedFiles that are checked
 const isElectron = !!(window.electronAPI && window.electronAPI.isElectron);
 let draggedIdx = null;   // index being dragged
 let draggedFrom = null;  // 'left' or 'right'
+let focusedIdx = null;   // keyboard-focused row (DEL/arrow navigation)
 
 /* ─── DOM refs ────────────────────────────────────────────── */
 const $ = s => document.querySelector(s);
@@ -398,8 +399,44 @@ function esc(s) {
     return d.innerHTML;
 }
 
-/* ─── Scan ────────────────────────────────────────────────── */
-btnScan.addEventListener("click", doScan);
+/* ─── Action hint banner ──────────────────────────────────── */
+const ACTION_HINTS = {
+    rename:   "Rename (in-place): only the filename changes — files stay in their current folder. Works on NAS/SMB. No new folders are created.",
+    test:     "Test (Dry Run): nothing is changed on disk. Preview results only.",
+    move:     "Move: files are moved to a new path built from the template. Source file is deleted. New folders are created as needed.",
+    copy:     "Copy: a renamed copy is placed in the new path. Original file is kept.",
+    hardlink: "Hard Link: a directory entry that shares the same data blocks. Both names refer to the same file. Same filesystem required.",
+    symlink:  "Symlink: a symbolic link placed at the new path pointing back to the original. Not supported on SMB/CIFS or FAT/exFAT.",
+};
+
+const elActionHint = (() => {
+    const el = document.createElement("div");
+    el.id = "action-hint";
+    el.className = "action-hint hidden";
+    // Insert below the scanbar, above the dual-pane
+    const statusBar = $id("status-bar");
+    statusBar.parentNode.insertBefore(el, statusBar.nextSibling);
+    return el;
+})();
+
+function updateActionHint() {
+    const hint = ACTION_HINTS[elAction.value];
+    if (hint) {
+        elActionHint.textContent = hint;
+        elActionHint.className = "action-hint action-hint-" + elAction.value;
+    } else {
+        elActionHint.className = "action-hint hidden";
+    }
+}
+
+elAction.addEventListener("change", () => {
+    updateActionHint();
+    // Refresh the right pane so the preview reflects the new action mode
+    if (matchResults.some(r => r && r.matched)) renderRight();
+});
+updateActionHint(); // run once on load
+
+
 elScanPath.addEventListener("keydown", e => { if (e.key === "Enter") doScan(); });
 
 /* ─── Browse ──────────────────────────────────────────────── */
@@ -879,6 +916,19 @@ function renderLeft() {
             else selectedSet.delete(idx);
         });
     });
+
+    // Row click → set keyboard focus (ignore checkbox clicks)
+    leftList.querySelectorAll(".row-item[data-idx]").forEach(el => {
+        el.addEventListener("click", e => {
+            if (e.target.tagName === "INPUT") return;
+            focusRow(parseInt(el.dataset.idx));
+        });
+    });
+
+    // Restore focused row highlight after re-render
+    if (focusedIdx !== null && focusedIdx < scannedFiles.length) {
+        leftList.querySelector(`.row-item[data-idx="${focusedIdx}"]`)?.classList.add("row-focused");
+    }
 }
 
 /* ─── Render Right Pane (New Names) ───────────────────────── */
@@ -924,6 +974,11 @@ function renderRight() {
                 metaLine += `</div>`;
             }
 
+            // For rename (in-place) show only the filename, not the full template path
+            const displayName = elAction.value === "rename"
+                ? (m.new_name || "")
+                : (m.preview || m.new_name || "");
+
             html += `<div class="row-item" data-idx="${i}" draggable="true"
                           onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
                           oncontextmenu="R.showContextMenu(event, ${i}, 'right')"
@@ -933,7 +988,7 @@ function renderRight() {
                           ondragend="R.dragEnd(event)">
                 <div class="row-icon">${poster}</div>
                 <div style="flex:1;min-width:0;">
-                    <span class="row-text newname" title="${esc(m.preview || m.new_name || "")}">${esc(m.preview || m.new_name || "")}</span>
+                    <span class="row-text newname" title="${esc(displayName)}">${esc(displayName)}</span>
                     ${metaLine}
                 </div>
                 <div class="row-tags">
@@ -947,6 +1002,18 @@ function renderRight() {
         }
     }
     rightList.innerHTML = html;
+
+    // Row click → set keyboard focus
+    rightList.querySelectorAll(".row-item[data-idx]").forEach(el => {
+        el.addEventListener("click", e => {
+            focusRow(parseInt(el.dataset.idx));
+        });
+    });
+
+    // Restore focused row highlight after re-render
+    if (focusedIdx !== null && focusedIdx < scannedFiles.length) {
+        rightList.querySelector(`.row-item[data-idx="${focusedIdx}"]`)?.classList.add("row-focused");
+    }
 }
 
 /* ─── Render Gutter Arrows ────────────────────────────────── */
@@ -982,12 +1049,13 @@ function createContextMenu() {
 
 function showContextMenu(e, idx, pane) {
     e.preventDefault();
+    focusRow(idx); // focus the right-clicked row so DEL works for the next one
     if (!contextMenu) contextMenu = createContextMenu();
     
     const f = scannedFiles[idx];
     const m = matchResults[idx];
     
-    let html = `<div class="ctx-item" onclick="R.removeFile(${idx})">🗑 Remove from list</div>`;
+    let html = `<div class="ctx-item ctx-delete" onclick="R.removeFile(${idx})"><span>🗑 Remove from list</span><kbd>Del</kbd></div>`;
     html += `<div class="ctx-sep"></div>`;
     if (pane === "left" && f) {
         html += `<div class="ctx-item" onclick="R.copyPath('${esc(f.path)}', event)">📋 Copy path</div>`;
@@ -1023,10 +1091,9 @@ window.R = {
     },
     showContextMenu,
     removeFile(idx) {
-        selectedSet.clear();
-        selectedSet.add(idx);
-        removeSelected();
+        removeSingleFile(idx);
     },
+    focusRow,
     copyPath(path, e) {
         e?.stopPropagation();
         navigator.clipboard.writeText(path).then(() => {
@@ -1260,8 +1327,48 @@ document.addEventListener("keydown", e => {
     }
 });
 
+/* Focus a single row by index (syncs both panes visually). */
+function focusRow(idx) {
+    document.querySelectorAll(".row-item.row-focused").forEach(el => el.classList.remove("row-focused"));
+    focusedIdx = idx;
+    if (idx === null) return;
+    leftList.querySelector(`.row-item[data-idx="${idx}"]`)?.classList.add("row-focused");
+    rightList.querySelector(`.row-item[data-idx="${idx}"]`)?.classList.add("row-focused");
+}
+
+/* Remove one file by index and advance keyboard focus to the next row. */
+function removeSingleFile(idx) {
+    if (idx < 0 || idx >= scannedFiles.length) return;
+
+    // Determine which index to focus after removal
+    const nextFocus = scannedFiles.length === 1
+        ? null
+        : idx < scannedFiles.length - 1 ? idx : idx - 1;
+
+    scannedFiles.splice(idx, 1);
+    matchResults.splice(idx, 1);
+
+    // Remap selectedSet indices after splice
+    const newSelected = new Set();
+    selectedSet.forEach(i => {
+        if (i < idx) newSelected.add(i);
+        else if (i > idx) newSelected.add(i - 1);
+        // i === idx: removed — drop it
+    });
+    selectedSet = newSelected;
+    focusedIdx = nextFocus; // set before render so restoreRowFocus() picks it up
+
+    renderLeft();
+    renderRight();
+    renderGutter();
+    leftCount.textContent = scannedFiles.length;
+    btnMatch.disabled = scannedFiles.length === 0;
+    btnRename.disabled = !matchResults.some(r => r && r.matched);
+}
+
 function removeSelected() {
     if (selectedSet.size === 0) return;
+    focusedIdx = null;
     const toRemove = Array.from(selectedSet).sort((a, b) => b - a);
     for (const idx of toRemove) {
         scannedFiles.splice(idx, 1);

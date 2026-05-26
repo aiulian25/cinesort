@@ -18,7 +18,7 @@ services:
       - CINESORT_PORT=8888
     volumes:
       - cinesort-data:/data
-      - /path/to/your/media:/media
+      - /mnt:/mnt:rw  # Mount /mnt directory with read-write access
     restart: unless-stopped
 
 volumes:

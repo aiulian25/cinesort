@@ -36,6 +36,7 @@
                     <div class="toolbar-group">
                         <label class="toolbar-label">Action</label>
                         <select id="action" class="glass-select">
+                            <option value="rename">Rename (in-place)</option>
                             <option value="test">Test (Dry Run)</option>
                             <option value="move">Move</option>
                             <option value="copy">Copy</option>
@@ -48,9 +49,10 @@
                         <input type="text" id="template" class="glass-input mono"
                                value="{n}/Season {s}/{n} - {s00e00} - {t}" spellcheck="false">
                         <div class="template-presets">
-                            <button class="preset-btn" data-template="{n}/Season {s}/{n} - {s00e00} - {t}" title="TV Series">TV</button>
-                            <button class="preset-btn" data-template="{n} ({y})/{n} ({y})" title="Movie">Film</button>
-                            <button class="preset-btn" data-template="{n}/{n} - {absolute} - {t}" title="Anime">Anime</button>
+                            <button class="preset-btn" data-template="{n}/Season {s}/{n} - {s00e00} - {t}" title="TV Series (organise into folders)">TV</button>
+                            <button class="preset-btn" data-template="{n} ({y})/{n} ({y})" title="Movie (organise into folder)">Film</button>
+                            <button class="preset-btn" data-template="{n}/{n} - {absolute} - {t}" title="Anime (organise into folder)">Anime</button>
+                            <button class="preset-btn" data-template="{n} - {s00e00} - {t}" title="Rename in-place (no folder creation)">Flat</button>
                         </div>
                     </div>
                 </div>

@@ -6,7 +6,7 @@ FROM python:3.11-slim
 
 LABEL maintainer="CineSort <app@cinesort.local>"
 LABEL description="Professional media file organizer with smart metadata matching"
-LABEL version="1.0.0"
+LABEL version="1.1.0"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \

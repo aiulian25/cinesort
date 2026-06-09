@@ -1,4 +1,4 @@
-const { app, BrowserWindow, nativeImage } = require("electron");
+const { app, BrowserWindow, dialog, nativeImage } = require("electron");
 const { spawn, execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -51,16 +51,239 @@ function getIconPath() {
     return null;
 }
 
-function findPython() {
-    // In packaged app, venv is in resources/venv
-    const packaged = path.join(process.resourcesPath, "venv", "bin", "python3");
-    const dev = path.join(__dirname, "..", ".venv", "bin", "python3");
+// ── Python version constants ──────────────────────────────────────────────────
+const PYTHON_MIN_MINOR = 9;   // require Python >= 3.9
+const PYTHON_SEARCH_PREFIXES = ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
+
+// ── Python discovery helpers ──────────────────────────────────────────────────
+
+/**
+ * Read the Python minor version the bundled venv was built for.
+ * Inspects the venv/lib/pythonX.Y directory name.
+ * Returns e.g. { major: 3, minor: 12 } or null.
+ */
+function readVenvPythonVersion(venvDir) {
+    const libDir = path.join(venvDir, "lib");
     try {
-        require("fs").accessSync(packaged);
-        return packaged;
-    } catch {
-        return dev;
+        for (const entry of fs.readdirSync(libDir)) {
+            const m = entry.match(/^python(\d+)\.(\d+)$/);
+            if (m) return { major: parseInt(m[1]), minor: parseInt(m[2]) };
+        }
+    } catch {}
+    return null;
+}
+
+/**
+ * Find a system Python binary.
+ * @param {number|null} preferMinor - Prefer this minor version (exact match).
+ * Returns { path, major, minor } or null.
+ */
+function probeSystemPython(preferMinor = null) {
+    // Try exact match first
+    if (preferMinor !== null) {
+        for (const pre of PYTHON_SEARCH_PREFIXES) {
+            const p = path.join(pre, `python3.${preferMinor}`);
+            if (fs.existsSync(p)) return { path: p, major: 3, minor: preferMinor };
+        }
     }
+    // Try any compatible version, newest first
+    for (let minor = 20; minor >= PYTHON_MIN_MINOR; minor--) {
+        for (const pre of PYTHON_SEARCH_PREFIXES) {
+            const p = path.join(pre, `python3.${minor}`);
+            if (fs.existsSync(p)) return { path: p, major: 3, minor };
+        }
+    }
+    return null;
+}
+
+/**
+ * Repair the broken symlinks inside the bundled venv and rewrite pyvenv.cfg
+ * to point to `sysPyPath`.  Only call when the discovered system Python version
+ * exactly matches the venv's built-for version.
+ */
+function fixVenvSymlinks(venvDir, venvVer, sysPyPath) {
+    const binDir = path.join(venvDir, "bin");
+    const venvPy = path.join(binDir, "python3");
+    const venvPyVer = path.join(binDir, `python${venvVer.major}.${venvVer.minor}`);
+
+    try {
+        // Atomic replace: write to .tmp then rename
+        for (const link of [venvPy, venvPyVer]) {
+            const tmp = link + ".tmp";
+            if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+            fs.symlinkSync(sysPyPath, tmp);
+            fs.renameSync(tmp, link);
+        }
+
+        // Also patch pyvenv.cfg so `python3 -m venv --upgrade` works later
+        const cfgPath = path.join(venvDir, "pyvenv.cfg");
+        if (fs.existsSync(cfgPath)) {
+            let cfg = fs.readFileSync(cfgPath, "utf8");
+            cfg = cfg.replace(/^home\s*=.*$/m, `home = ${path.dirname(sysPyPath)}`);
+            fs.writeFileSync(cfgPath, cfg);
+        }
+
+        console.log(`[main] Repaired venv symlinks → ${sysPyPath}`);
+        return true;
+    } catch (e) {
+        console.warn("[main] Could not repair venv symlinks:", e.message);
+        return false;
+    }
+}
+
+/**
+ * Run a command and return stdout.  Rejects on non-zero exit.
+ */
+function runCmd(cmd, args) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        const errChunks = [];
+        const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+        proc.stdout.on("data", d => chunks.push(d));
+        proc.stderr.on("data", d => errChunks.push(d));
+        proc.on("exit", code => {
+            if (code === 0) resolve(Buffer.concat(chunks).toString());
+            else reject(new Error(`${path.basename(cmd)} exited ${code}: ${Buffer.concat(errChunks).toString().trim()}`));
+        });
+    });
+}
+
+/**
+ * Create (or verify) a user-local venv at ~/.local/share/cinesort/venv
+ * using `sysPyPath` and install from the bundled requirements.txt.
+ * Returns the path to the venv's python3, or null on failure.
+ */
+async function ensureUserVenv(sysPyPath) {
+    const userVenvDir = path.join(os.homedir(), ".local", "share", "cinesort", "venv");
+    const userPython  = path.join(userVenvDir, "bin", "python3");
+
+    // Check if an existing user venv is still healthy
+    if (fs.existsSync(userPython)) {
+        try {
+            const real = fs.realpathSync(userPython);
+            if (fs.existsSync(real)) {
+                console.log(`[main] User venv OK: ${real}`);
+                return userPython;
+            }
+        } catch {}
+        console.warn("[main] User venv is stale, rebuilding...");
+    }
+
+    const reqFile = path.join(process.resourcesPath, "requirements.txt");
+    if (!fs.existsSync(reqFile)) {
+        console.error("[main] requirements.txt not found in resources — cannot build user venv");
+        return null;
+    }
+
+    try {
+        console.log(`[main] Building user venv at ${userVenvDir} with ${sysPyPath}…`);
+        fs.mkdirSync(path.dirname(userVenvDir), { recursive: true });
+        await runCmd(sysPyPath, ["-m", "venv", "--clear", userVenvDir]);
+        const pip = path.join(userVenvDir, "bin", "pip");
+        await runCmd(pip, ["install", "--quiet", "-r", reqFile]);
+        console.log("[main] User venv ready.");
+        return userPython;
+    } catch (e) {
+        console.error("[main] Failed to build user venv:", e.message);
+        return null;
+    }
+}
+
+/**
+ * Locate or repair the Python interpreter to use.
+ *
+ * Strategy (in order):
+ *   1. Bundled venv symlink valid → use it directly (fast path, no repairs).
+ *   2. Bundled venv symlink broken + system has EXACT same minor version
+ *      → repair symlinks (no network, instant).
+ *   3. Bundled venv symlink broken + system has DIFFERENT compatible version
+ *      → build a user venv in ~/.local/share/cinesort/venv (one-time pip install).
+ *   4. Dev mode → use .venv in project root.
+ *
+ * Returns { python: string, firstRun: boolean }
+ */
+async function findOrCreatePython() {
+    const venvDir = path.join(process.resourcesPath, "venv");
+    const isPackaged = fs.existsSync(venvDir);
+
+    if (!isPackaged) {
+        // Development mode
+        return { python: path.join(__dirname, "..", ".venv", "bin", "python3"), firstRun: false };
+    }
+
+    const venvPython = path.join(venvDir, "bin", "python3");
+
+    // ── Fast path: bundled venv symlink is valid ──────────────────────────────
+    try {
+        const real = fs.realpathSync(venvPython);
+        if (fs.existsSync(real)) {
+            console.log(`[main] Bundled venv OK: ${real}`);
+            return { python: venvPython, firstRun: false };
+        }
+    } catch {}
+
+    console.warn("[main] Bundled venv Python symlink is broken — attempting repair…");
+
+    const venvVer = readVenvPythonVersion(venvDir);
+    const preferMinor = venvVer ? venvVer.minor : null;
+    const sysPy = probeSystemPython(preferMinor);
+
+    if (!sysPy) {
+        await dialog.showMessageBox({
+            type: "error",
+            title: "Python not found",
+            message: "CineSort requires Python 3.9 or later.",
+            detail:
+                "No compatible Python installation was found on this system.\n\n" +
+                "Install Python 3.9+ from your distribution's package manager:\n" +
+                "  sudo apt install python3        (Debian / Ubuntu)\n" +
+                "  sudo dnf install python3        (Fedora / RHEL)\n\n" +
+                "Then relaunch CineSort.",
+            buttons: ["Quit"],
+        });
+        app.quit();
+        return { python: null, firstRun: false };
+    }
+
+    // ── Repair path: system Python matches the venv's built-for version ───────
+    if (venvVer && sysPy.minor === venvVer.minor) {
+        if (fixVenvSymlinks(venvDir, venvVer, sysPy.path)) {
+            return { python: venvPython, firstRun: false };
+        }
+        // fixVenvSymlinks failed (permissions?) — fall through to user venv
+    }
+
+    // ── Rebuild path: different version → create user venv ───────────────────
+    // The C extensions in the bundled venv (pydantic-core, uvloop, httptools)
+    // are compiled for Python ${venvVer?.minor ?? '?'}, so we cannot reuse them
+    // with a different minor version.  Build a fresh venv instead.
+    if (venvVer) {
+        console.warn(
+            `[main] System Python 3.${sysPy.minor} ≠ bundled venv Python 3.${venvVer.minor} — ` +
+            `building user venv with system Python…`
+        );
+    }
+
+    const userPython = await ensureUserVenv(sysPy.path);
+    if (!userPython) {
+        await dialog.showMessageBox({
+            type: "error",
+            title: "Setup failed",
+            message: "CineSort could not set up its Python environment.",
+            detail:
+                `Python ${sysPy.minor} was found at ${sysPy.path} but installing ` +
+                "the required packages failed.\n\n" +
+                "Check your internet connection and try relaunching CineSort.\n" +
+                "If the problem persists, run:\n" +
+                `  python3 -m venv ~/.local/share/cinesort/venv\n` +
+                `  ~/.local/share/cinesort/venv/bin/pip install fastapi uvicorn httpx pydantic`,
+            buttons: ["Quit"],
+        });
+        app.quit();
+        return { python: null, firstRun: false };
+    }
+
+    return { python: userPython, firstRun: true };
 }
 
 function findCwd() {
@@ -74,8 +297,7 @@ function findCwd() {
     }
 }
 
-function startPython() {
-    const python = findPython();
+function startPython(python) {
     const cwd = findCwd();
     console.log(`[main] Starting uvicorn: ${python} in ${cwd}`);
 
@@ -217,10 +439,19 @@ app.whenReady().then(async () => {
     // Self-install desktop entry + icon on first launch (AppImage only)
     installDesktopEntry();
 
-    startPython();
+    // Resolve Python — repairs broken venv symlinks or builds a user venv as
+    // needed.  Must complete before startPython() is called.
+    const { python, firstRun } = await findOrCreatePython();
+    if (!python) return;  // dialog shown + app.quit() already called
+
+    startPython(python);
+
+    // Allow more time on the very first launch (user venv pip install already
+    // completed, but uvicorn cold-start with freshly installed packages is slower).
+    const serverTimeout = firstRun ? 60_000 : 20_000;
 
     try {
-        await waitForServer();
+        await waitForServer(serverTimeout);
     } catch (err) {
         console.error(err.message);
         app.quit();

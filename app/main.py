@@ -3,6 +3,19 @@ Media Renamer — FastAPI backend.
 Serves the web UI and provides API endpoints for scanning, matching, and renaming.
 """
 
+import sys
+
+# Enforce minimum Python version before any other import.
+# list[str] / dict[str, x] built-in generics (PEP 585) require 3.9+.
+# pydantic v2 requires 3.8+; fastapi ≥ 0.100 requires 3.8+.
+# We gate at 3.9 because that is the tightest real constraint in this codebase.
+if sys.version_info < (3, 9):
+    sys.exit(
+        f"CineSort requires Python 3.9 or later.\n"
+        f"Running under Python {sys.version}.\n"
+        f"Please install Python 3.9+ or rebuild the application venv."
+    )
+
 import os
 import asyncio
 from pathlib import Path
@@ -846,7 +859,8 @@ async def get_settings():
         "omdb_key_set": status.get("OMDB_API_KEY", False),
         # Let the UI show where the file lives (helpful for power users)
         "config_file": str(config_file()),
-        # Indicate whether OMDb is actually usable right now
+        # Indicate whether each client is actually usable right now
+        "tmdb_enabled": tmdb.enabled,
         "omdb_enabled": omdb.enabled,
     }
 
@@ -891,6 +905,7 @@ async def post_settings(req: SettingsRequest):
         "success": True,
         "tmdb_key_set": status.get("TMDB_API_KEY", False),
         "omdb_key_set": status.get("OMDB_API_KEY", False),
+        "tmdb_enabled": tmdb.enabled,
         "omdb_enabled": omdb.enabled,
     }
 

@@ -72,6 +72,7 @@ cinesort                    # or launch from your application menu
 chmod +x CineSort-1.2.0.AppImage
 ./CineSort-1.2.0.AppImage
 ```
+On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
 ---
 
@@ -82,7 +83,7 @@ chmod +x CineSort-1.2.0.AppImage
 | Source | Key required? | What it unlocks |
 |--------|:---:|---|
 | **TVMaze** | ✗ | Free TV episode data, no limits |
-| **TMDb** | Optional | Movies + TV; a default key is bundled for light use. Your own key is recommended for heavy use. Adult titles require the Adult toggle to be enabled. |
+| **TMDb** | Optional | Movies + TV; your own key unlocks full API access. Adult titles require the Adult toggle. |
 | **OMDb** | Optional | IMDb data; automatically used as fallback when TMDb returns no results. Unlocks niche and adult titles without the Adult toggle. |
 
 ### Getting a TMDb key (free)

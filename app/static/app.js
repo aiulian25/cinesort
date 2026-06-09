@@ -47,6 +47,28 @@ const modalTitle   = $id("modal-title");
 const modalBody    = $id("modal-body");
 const modalClose   = $id("modal-close");
 
+const keyBanner        = $id("key-banner");
+const bannerOpenSettings = $id("banner-open-settings");
+const bannerDismiss    = $id("banner-dismiss");
+
+/* ─── First-run key check ─────────────────────────────────── */
+(async function checkKeysOnStartup() {
+    try {
+        const s = await api("/api/settings");
+        if (!s.tmdb_enabled) {
+            keyBanner.classList.remove("hidden");
+        }
+    } catch {
+        // Non-fatal — banner stays hidden if the request fails
+    }
+})();
+
+bannerOpenSettings.addEventListener("click", () => {
+    keyBanner.classList.add("hidden");
+    showSettings();
+});
+bannerDismiss.addEventListener("click", () => keyBanner.classList.add("hidden"));
+
 /* ─── Helpers ─────────────────────────────────────────────── */
 function status(msg, pct) {
     statusBar.classList.remove("hidden");
@@ -879,6 +901,8 @@ async function showSettings() {
             msg.style.color = "var(--green)";
             msg.textContent = "✓ Saved. Keys are active for this session.";
             saveBtn.textContent = "Saved!";
+            // Hide the first-run banner once keys are saved
+            if (result.tmdb_enabled) keyBanner.classList.add("hidden");
             // Refresh badge status
             setTimeout(() => showSettings(), 1200);
         } catch (err) {

@@ -12,9 +12,6 @@ from typing import Optional
 API_BASE = "https://api.themoviedb.org/3"
 IMAGE_BASE = "https://image.tmdb.org/t/p"
 
-# Default API key (for testing only) — users should get their own at https://www.themoviedb.org/settings/api
-# This default key is ONLY used if TMDB_API_KEY environment variable is not set
-DEFAULT_API_KEY = "1bb965af6888496c30d52a27e831f9c9"
 
 
 @dataclass
@@ -54,22 +51,13 @@ class TMDbEpisode:
 
 class TMDbClient:
     def __init__(self, api_key: Optional[str] = None):
-        # Priority: 1) Provided key, 2) Environment variable, 3) Default key
-        # If user explicitly sets TMDB_API_KEY env var, default is NOT used as fallback
-        if api_key:
-            self.api_key = api_key
-        else:
-            env_key = os.getenv("TMDB_API_KEY")
-            if env_key:
-                self.api_key = env_key
-                # User provided their own key - default is disabled
-            else:
-                # No custom key provided, use default (for testing only)
-                self.api_key = DEFAULT_API_KEY
+        # Priority: 1) Provided key, 2) Environment variable, 3) None (disabled)
+        self.api_key = api_key or os.getenv("TMDB_API_KEY", "")
+        self.enabled = bool(self.api_key)
         
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
-            params={"api_key": self.api_key},
+            params={"api_key": self.api_key} if self.api_key else {},
             timeout=15.0,
             headers={"Accept": "application/json"},
         )
@@ -80,6 +68,8 @@ class TMDbClient:
         year: Optional[int] = None,
         include_adult: bool = False,
     ) -> list[TMDbResult]:
+        if not self.enabled:
+            return []
         params = {"query": query, "include_adult": "true" if include_adult else "false"}
         if year:
             params["year"] = str(year)
@@ -102,6 +92,8 @@ class TMDbClient:
         return results
 
     async def search_tv(self, query: str, year: Optional[int] = None) -> list[TMDbResult]:
+        if not self.enabled:
+            return []
         params = {"query": query}
         if year:
             params["first_air_date_year"] = str(year)

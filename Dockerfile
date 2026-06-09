@@ -1,12 +1,16 @@
 # CineSort Docker Container
 # Professional media file organizer with TMDb and TVmaze integration
 # Access via web browser at http://localhost:8888
+#
+# Python version: override at build time with --build-arg PYTHON_VERSION=3.12
+# Supported range: 3.9 – 3.13  (3.11 is the tested default)
 
-FROM python:3.11-slim
+ARG PYTHON_VERSION=3.11
+FROM python:${PYTHON_VERSION}-slim
 
 LABEL maintainer="CineSort <app@cinesort.local>"
 LABEL description="Professional media file organizer with smart metadata matching"
-LABEL version="1.1.0"
+LABEL version="1.2.0"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \

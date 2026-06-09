@@ -579,6 +579,32 @@ body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px rgba(99,102,241,.25)
     font-size: 10px; color: var(--txt3); word-break: break-all; user-select: all;
 }
 
+/* ─── API Key Banner ────────────────────────────────────────── */
+.key-banner {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 16px;
+    background: rgba(245,158,11,.12);
+    border: 1px solid rgba(245,158,11,.3);
+    border-radius: var(--radius-sm);
+    color: var(--amber);
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0 0 6px;
+}
+.key-banner.hidden { display: none; }
+.banner-link {
+    background: none; border: none; padding: 0;
+    color: var(--accent); font-size: 12px; font-weight: 600;
+    cursor: pointer; text-decoration: underline;
+}
+.banner-link:hover { color: #818cf8; }
+.banner-dismiss {
+    margin-left: auto; flex-shrink: 0;
+    background: none; border: none; font-size: 16px; line-height: 1;
+    color: var(--txt3); cursor: pointer; padding: 0 2px;
+}
+.banner-dismiss:hover { color: var(--txt); }
+
 /* ─── Folder Browser ────────────────────────────────────────── */
 .browser-item {
     display: flex;

@@ -20,9 +20,9 @@ services:
       - PUID=1000
       - PGID=1000
       # Optional: get yours at https://www.themoviedb.org/settings/api
-      - TMDB_API_KEY=your_tmdb_api_key_here
+      # - TMDB_API_KEY=your_tmdb_api_key_here
       # Optional: free key at https://www.omdbapi.com/apikey.aspx
-      - OMDB_API_KEY=your_omdb_api_key_here
+      # - OMDB_API_KEY=your_omdb_api_key_here
       - CINESORT_HOST=0.0.0.0
       - CINESORT_PORT=8888
     volumes:

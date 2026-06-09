@@ -11,8 +11,7 @@ services:
       - PGID=1000
       
       # Optional: Custom TMDb API key (get yours at https://www.themoviedb.org/settings/api)
-      # If you set this, the default embedded key will NOT be used as fallback
-      # Leave commented to use the default key (for testing only)
+      # Required for TV + movie metadata. Without it the TMDb source is disabled.
       # - TMDB_API_KEY=your_tmdb_api_key_here
 
       # Optional: OMDb API key — enables IMDb data + adult-title fallback

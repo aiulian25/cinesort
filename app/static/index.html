@@ -84,6 +84,16 @@
             </div>
         </header>
 
+        <!-- ═══ API Key Banner (shown when TMDb key is missing) ═══ -->
+        <div id="key-banner" class="key-banner hidden">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <span>No API keys configured — metadata lookup is disabled.
+                <button id="banner-open-settings" class="banner-link">Open Settings</button>
+                to add your free TMDb key.
+            </span>
+            <button id="banner-dismiss" class="banner-dismiss" title="Dismiss">&times;</button>
+        </div>
+
         <!-- ═══ Scan Bar ═══ -->
         <div class="glass-panel scanbar">
             <svg class="scanbar-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

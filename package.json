@@ -13,7 +13,9 @@
     "build": "electron-builder --linux",
     "docker:build": "docker build --build-arg PYTHON_VERSION=3.11 -t cinesort:latest -t cinesort:1.2.0 .",
     "docker:push": "docker tag cinesort:1.2.0 aiulian25/cinesort:1.2.0 && docker tag cinesort:1.2.0 aiulian25/cinesort:latest && docker push aiulian25/cinesort:1.2.0 && docker push aiulian25/cinesort:latest",
-    "docker:release": "npm run docker:build && npm run docker:push"
+    "docker:release": "npm run docker:build && npm run docker:push",
+    "gh:upload": "gh release upload v1.2.0 dist/CineSort-1.2.0.AppImage dist/cinesort_1.2.0_amd64.deb --clobber",
+    "release": "npm run build && npm run docker:release && npm run gh:upload"
   },
   "build": {
     "appId": "com.cinesort.app",

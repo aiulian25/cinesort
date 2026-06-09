@@ -74,8 +74,13 @@ class TMDbClient:
             headers={"Accept": "application/json"},
         )
 
-    async def search_movie(self, query: str, year: Optional[int] = None) -> list[TMDbResult]:
-        params = {"query": query, "include_adult": "false"}
+    async def search_movie(
+        self,
+        query: str,
+        year: Optional[int] = None,
+        include_adult: bool = False,
+    ) -> list[TMDbResult]:
+        params = {"query": query, "include_adult": "true" if include_adult else "false"}
         if year:
             params["year"] = str(year)
         resp = await self._client.get("/search/movie", params=params)

@@ -1,0 +1,35 @@
+# Docker Compose for local development/building
+# Copy this file to docker-compose.dev.yml and fill in your API keys.
+# docker-compose.dev.yml is gitignored — your keys stay local.
+#
+# Usage:
+#   cp docker-compose.dev.example.yml docker-compose.dev.yml
+#   # Edit docker-compose.dev.yml with your keys
+#   docker compose -f docker-compose.dev.yml up
+
+services:
+  cinesort:
+    image: cinesort:latest
+    container_name: cinesort
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8888:8888"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      # Optional: get yours at https://www.themoviedb.org/settings/api
+      - TMDB_API_KEY=your_tmdb_api_key_here
+      # Optional: free key at https://www.omdbapi.com/apikey.aspx
+      - OMDB_API_KEY=your_omdb_api_key_here
+      - CINESORT_HOST=0.0.0.0
+      - CINESORT_PORT=8888
+    volumes:
+      - cinesort-data:/data
+      - /mnt:/mnt:rw
+    restart: unless-stopped
+
+volumes:
+  cinesort-data:
+    driver: local

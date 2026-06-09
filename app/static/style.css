@@ -162,6 +162,9 @@ body {
     width: 5px; height: 8px;
     border: solid white; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
 }
+/* Adult toggle: amber accent to signal content-gate is unlocked */
+#include-adult:checked { background: var(--amber); border-color: var(--amber); }
+label:has(#include-adult:checked) { color: #fcd34d; }
 
 /* ─── Scan bar ────────────────────────────────────────────────── */
 .scanbar {
@@ -445,6 +448,68 @@ body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px rgba(99,102,241,.25)
 }
 .ctx-sep { height: 1px; background: var(--border); margin: 4px 0; }
 
+/* ─── Manual rename — inline edit ─────────────────────────────── */
+/* Pencil trigger button (visible on row hover, always on for failed matches) */
+.row-edit-btn {
+    flex-shrink: 0;
+    background: none; border: none; cursor: pointer;
+    color: var(--txt3); padding: 3px 5px; border-radius: 4px;
+    display: flex; align-items: center; gap: 3px;
+    font-size: 11px; opacity: 0;
+    transition: opacity .15s, background .12s, color .12s;
+}
+.row-item:hover .row-edit-btn { opacity: 1; }
+.row-edit-btn:hover { background: var(--glass-hover); color: var(--txt); }
+
+/* CTA variant — always visible on rows that failed auto-match */
+.row-edit-btn-cta {
+    opacity: 1 !important;
+    color: var(--amber);
+    padding: 2px 7px;
+    border: 1px solid rgba(245,158,11,.25);
+    background: rgba(245,158,11,.07);
+}
+.row-edit-btn-cta:hover { background: rgba(245,158,11,.15); color: #fcd34d; }
+
+/* Row highlight while being edited */
+.row-item.editing {
+    background: rgba(99,102,241,.07);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Input field occupying the row */
+.row-edit-input {
+    flex: 1; min-width: 0;
+    background: var(--glass-hover);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    color: var(--txt);
+    font-family: var(--mono); font-size: 11px;
+    padding: 3px 7px; outline: none;
+    transition: box-shadow .12s;
+}
+.row-edit-input:focus { box-shadow: 0 0 0 2px rgba(99,102,241,.25); }
+
+/* Confirm / Cancel buttons */
+.row-edit-confirm, .row-edit-cancel-btn {
+    flex-shrink: 0;
+    width: 22px; height: 22px; border-radius: 4px; border: none;
+    cursor: pointer; font-size: 13px;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .12s;
+}
+.row-edit-confirm     { background: rgba(34,197,94,.15);  color: var(--green); }
+.row-edit-confirm:hover { background: rgba(34,197,94,.28); }
+.row-edit-cancel-btn  { background: rgba(239,68,68,.1);   color: var(--red); }
+.row-edit-cancel-btn:hover { background: rgba(239,68,68,.22); }
+
+/* Manual tag (amber) shown in place of score % */
+.tag.manual { color: #fcd34d; background: rgba(245,158,11,.13); }
+
+/* Unmatched row with CTA — slightly warmer background */
+.row-unmatched-cta { background: rgba(245,158,11,.03); }
+.row-unmatched-cta:hover { background: rgba(245,158,11,.07) !important; }
+
 /* ─── Metadata detail in right pane ───────────────────────────── */
 .meta-detail {
     font-size: 10px; color: var(--txt3); margin-top: 2px;
@@ -470,6 +535,49 @@ body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px rgba(99,102,241,.25)
 }
 .candidate-item:hover { background: var(--glass-active); border-color: var(--border-hi); }
 .candidate-item button { flex-shrink: 0; }
+
+/* ─── Settings modal ──────────────────────────────────────────── */
+.settings-row {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+.settings-row:last-of-type { border-bottom: none; }
+
+.settings-label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 600; color: var(--txt);
+    margin-bottom: 4px;
+}
+
+.settings-badge {
+    font-size: 10px; padding: 1px 7px; border-radius: 10px; font-weight: 500;
+}
+.settings-badge.ok      { color: var(--green);  background: var(--green-t);  }
+.settings-badge.missing { color: var(--txt3);   background: var(--glass-hover); }
+
+.settings-hint {
+    font-size: 11px; color: var(--txt3); margin-bottom: 8px; line-height: 1.6;
+}
+.settings-hint a {
+    color: var(--accent); text-decoration: none;
+}
+.settings-hint a:hover { text-decoration: underline; }
+
+.settings-input-row {
+    display: flex; gap: 6px; align-items: center;
+}
+.settings-input-row .glass-input { flex: 1; font-size: 11px; }
+
+.settings-eye {
+    flex-shrink: 0; background: var(--glass-hover); border: 1px solid var(--border);
+    border-radius: var(--radius-xs); padding: 4px 8px; cursor: pointer; font-size: 13px;
+    color: var(--txt3); transition: background .12s;
+}
+.settings-eye:hover { background: var(--glass-active); color: var(--txt); }
+
+.settings-path {
+    font-size: 10px; color: var(--txt3); word-break: break-all; user-select: all;
+}
 
 /* ─── Folder Browser ────────────────────────────────────────── */
 .browser-item {

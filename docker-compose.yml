@@ -14,6 +14,11 @@ services:
       # If you set this, the default embedded key will NOT be used as fallback
       # Leave commented to use the default key (for testing only)
       # - TMDB_API_KEY=your_tmdb_api_key_here
+
+      # Optional: OMDb API key — enables IMDb data + adult-title fallback
+      # Free tier: 1,000 requests/day. Get yours at https://www.omdbapi.com/apikey.aspx
+      # Without this key the OMDb source is silently disabled.
+      # - OMDB_API_KEY=your_omdb_api_key_here
       
       # Server configuration (usually no need to change these)
       - CINESORT_HOST=0.0.0.0

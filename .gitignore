@@ -14,17 +14,16 @@ node_modules/
 npm-debug.log*
 package-lock.json
 
-# Build artifacts (not needed for Docker deployment)
+# Build artifacts
 dist/
-build/
 *.deb
 *.AppImage
 extracted/
 decompiled/
 tools/
-electron/
 META-INF/
 net/
+# build/ and electron/ are Electron source — tracked intentionally
 
 # Node.js files
 package.json
@@ -47,6 +46,7 @@ test_media/
 
 # Docker
 docker-compose.override.yml
+docker-compose.dev.yml
 
 # Environment files
 .env

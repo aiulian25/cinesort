@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=CineSort
+Comment=Professional media file organizer
+Exec=AppRun %U
+Icon=cinesort
+Type=Application
+Categories=AudioVideo;Video;Utility;
+Terminal=false
+StartupWMClass=CineSort
+X-AppImage-Version=1.0.0

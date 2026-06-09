@@ -21,10 +21,17 @@ from app.core.matcher import cascade_score, name_similarity
 from app.core.formatter import apply_template, build_new_path, TEMPLATES, sanitize_filename
 from app.core.renamer import execute_rename, RenameAction, RenameResult
 from app.core.history import history, HistoryEntry
+from app.core.config import load_config, save_config, read_config_status, config_file
 from app.api.tmdb import TMDbClient
 from app.api.tvmaze import TVMazeClient
+from app.api.omdb import OMDbClient
 from datetime import datetime
 import uuid
+
+# ── Load user config (deb/AppImage: ~/.config/cinesort/keys.env) ─────────────
+# Must happen BEFORE API clients are instantiated so os.environ is populated.
+# Docker users: their env vars are already set; load_config() won't overwrite them.
+load_config()
 
 
 app = FastAPI(title="CineSort", version="1.2.0")
@@ -37,6 +44,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # TMDbClient will read TMDB_API_KEY from environment if set, otherwise uses default
 tmdb = TMDbClient()
 tvmaze = TVMazeClient()
+omdb = OMDbClient()   # reads OMDB_API_KEY env var; disabled (returns []) if not set
 
 
 @app.get("/")
@@ -84,10 +92,19 @@ class BatchScanRequest(BaseModel):
 
 class MatchRequest(BaseModel):
     files: list[dict]
-    datasource: str = "tmdb"  # "tmdb" or "tvmaze"
+    datasource: str = "tmdb"  # "tmdb" | "tvmaze" | "omdb"
     template: Optional[str] = None
     selected_show_id: Optional[int] = None  # User-selected show ID (bypasses search)
     selected_show_name: Optional[str] = None  # User-selected show name
+    include_adult: bool = False  # Pass through to TMDB; OMDb never filters adult content
+
+    @field_validator("datasource")
+    @classmethod
+    def validate_datasource(cls, v: str) -> str:
+        allowed = {"tmdb", "tvmaze", "omdb"}
+        if v not in allowed:
+            raise ValueError(f"datasource must be one of: {allowed}")
+        return v
 
 
 class RenameRequest(BaseModel):
@@ -100,6 +117,22 @@ class RenameRequest(BaseModel):
         valid = {a.value for a in RenameAction}
         if v not in valid:
             raise ValueError(f"Invalid action: {v}. Must be one of: {valid}")
+        return v
+
+
+class SettingsRequest(BaseModel):
+    """Keys sent by the Settings modal. Empty string = keep current key unchanged."""
+    tmdb_key: str = ""
+    omdb_key: str = ""
+
+    @field_validator("tmdb_key", "omdb_key")
+    @classmethod
+    def validate_key(cls, v: str) -> str:
+        import re
+        if v == "":
+            return v   # empty = "don't change this key"
+        if not re.fullmatch(r'[\x21-\x7E]{8,256}', v):
+            raise ValueError("API key must be 8-256 printable ASCII characters with no spaces.")
         return v
 
 
@@ -252,8 +285,9 @@ async def browse_directory(path: str = Query("/mnt")):
 async def search_metadata(
     q: str = Query(..., min_length=1),
     type: str = Query("tv", pattern="^(tv|movie)$"),
-    datasource: str = Query("tmdb", pattern="^(tmdb|tvmaze)$"),
+    datasource: str = Query("tmdb", pattern="^(tmdb|tvmaze|omdb)$"),
     year: Optional[int] = None,
+    include_adult: bool = Query(False),
 ):
     """Search for TV shows or movies by name."""
     results = []
@@ -262,7 +296,7 @@ async def search_metadata(
         if type == "tv":
             raw = await tmdb.search_tv(q, year)
         else:
-            raw = await tmdb.search_movie(q, year)
+            raw = await tmdb.search_movie(q, year, include_adult=include_adult)
         for r in raw[:10]:
             results.append({
                 "id": r.id,
@@ -288,6 +322,25 @@ async def search_metadata(
                     "rating": None,
                     "datasource": "tvmaze",
                 })
+    elif datasource == "omdb":
+        if omdb.enabled:
+            raw = await omdb.search_movie(q, year)
+            for r in raw[:10]:
+                results.append({
+                    "id": r.imdb_id,   # string tt-ID, not an int
+                    "title": r.title,
+                    "year": r.year,
+                    "overview": r.overview[:200] if r.overview else "",
+                    "poster": r.poster_url,
+                    "type": "movie",
+                    "rating": r.imdb_rating,
+                    "datasource": "omdb",
+                })
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail="OMDb is not configured. Set the OMDB_API_KEY environment variable."
+            )
 
     return {"results": results}
 
@@ -472,35 +525,83 @@ async def match_files(req: MatchRequest):
                     })
 
         elif media_type == "movie":
-            if req.datasource == "tmdb":
-                movies = await tmdb.search_movie(group_name, year)
-            else:
-                movies = []
+            # ── Gather candidates from requested source + smart fallbacks ──────
+            movie_candidates: list = []  # list of dicts with unified shape
+
+            if req.datasource in ("tmdb", "omdb"):
+                # Always try TMDB first (richer metadata, poster)
+                tmdb_results = await tmdb.search_movie(
+                    group_name, year, include_adult=req.include_adult
+                )
+                for r in tmdb_results:
+                    movie_candidates.append({
+                        "title": r.title,
+                        "original_title": r.original_title,
+                        "year": r.year,
+                        "poster": r.poster_url_small,
+                        "id": r.id,
+                        "source": "tmdb",
+                    })
+
+                # ── OMDb fallback: if TMDB returned nothing (adult / niche / obscure)
+                # or OMDb was explicitly requested, add OMDb results too.
+                if (not tmdb_results or req.datasource == "omdb") and omdb.enabled:
+                    omdb_results = await omdb.search_movie(group_name, year)
+                    for r in omdb_results:
+                        movie_candidates.append({
+                            "title": r.title,
+                            "original_title": r.title,   # OMDb doesn't split original_title
+                            "year": r.year,
+                            "poster": r.poster_url,
+                            "id": r.imdb_id,
+                            "source": "omdb",
+                        })
+
+                    print(f"[DEBUG] OMDb returned {len(omdb_results)} result(s) for '{group_name}'")
+
+            print(f"[DEBUG] Total movie candidates for '{group_name}': {len(movie_candidates)}")
 
             template = req.template or TEMPLATES["movie"]
             for f in group_files:
-                best_movie = None
-                best_score = 0
-                for movie in movies:
-                    score = name_similarity(f["clean_name"], movie.title)
-                    if year and movie.year:
-                        if abs(year - movie.year) <= 1:
-                            score += 0.3
-                        else:
-                            score -= 0.2
+                best_movie: Optional[dict] = None
+                best_score = 0.0
+
+                for candidate in movie_candidates:
+                    # Score against both display title and original title, take the higher
+                    ns_title = name_similarity(f["clean_name"], candidate["title"])
+                    ns_orig  = name_similarity(f["clean_name"], candidate.get("original_title") or "")
+                    ns = max(ns_title, ns_orig)
+
+                    # Year bonus/penalty (±1 year tolerance)
+                    score = cascade_score(
+                        file_name=f["clean_name"],
+                        file_season=None,
+                        file_episode=None,
+                        file_absolute=None,
+                        file_year=f.get("year"),
+                        meta_name=candidate["title"],
+                        meta_year=candidate.get("year"),
+                    )
+
+                    # If original_title gives a better name-similarity, boost by the delta
+                    if ns_orig > ns_title:
+                        score += (ns_orig - ns_title) * 0.5
+
+                    score = min(score, 1.0)
+
                     if score > best_score:
                         best_score = score
-                        best_movie = movie
+                        best_movie = candidate
 
                 if best_movie:
                     bindings = {
-                        "n": best_movie.title,
-                        "y": best_movie.year or "",
-                        "t": best_movie.title,
+                        "n": best_movie["title"],
+                        "y": best_movie.get("year") or "",
+                        "t": best_movie["title"],
                         "source": f.get("source", ""),
                         "vf": f.get("video_format", ""),
                         "group": f.get("group", ""),
-                        "id": best_movie.id,
+                        "id": best_movie["id"],
                     }
                     original = Path(f["path"])
                     new_path = build_new_path(original, template, bindings, original.parent)
@@ -513,9 +614,9 @@ async def match_files(req: MatchRequest):
                         "score": round(min(best_score, 1.0), 3),
                         "matched": True,
                         "metadata": {
-                            "title": best_movie.title,
-                            "year": best_movie.year,
-                            "poster": best_movie.poster_url_small,
+                            "title": best_movie["title"],
+                            "year": best_movie.get("year"),
+                            "poster": best_movie.get("poster"),
                         },
                     })
                 else:
@@ -730,7 +831,72 @@ async def clear_history():
     return {"success": True, "message": "History cleared"}
 
 
+# ─── Settings Endpoints ────────────────────────────────────────────────────────
+
+@app.get("/api/settings")
+async def get_settings():
+    """
+    Return which API keys are currently active.
+    NEVER returns key values — only presence booleans and the config file path
+    so the UI can show where to edit manually if needed.
+    """
+    status = read_config_status()
+    return {
+        "tmdb_key_set": status.get("TMDB_API_KEY", False),
+        "omdb_key_set": status.get("OMDB_API_KEY", False),
+        # Let the UI show where the file lives (helpful for power users)
+        "config_file": str(config_file()),
+        # Indicate whether OMDb is actually usable right now
+        "omdb_enabled": omdb.enabled,
+    }
+
+
+@app.post("/api/settings")
+async def post_settings(req: SettingsRequest):
+    """
+    Save API keys to ~/.config/cinesort/keys.env (desktop installs) and
+    hot-reload them into the running process — no restart required.
+
+    Docker users whose keys come from docker-compose env vars are unaffected:
+    save_config() will not overwrite existing os.environ entries, but it WILL
+    update the file so desktop users who later run outside Docker also benefit.
+    """
+    global tmdb, omdb
+
+    updates: dict[str, str] = {}
+    if req.tmdb_key != "":
+        updates["TMDB_API_KEY"] = req.tmdb_key
+    elif req.tmdb_key == "" and "TMDB_API_KEY" in (req.model_fields_set or set()):
+        updates["TMDB_API_KEY"] = ""   # explicit clear
+
+    if req.omdb_key != "":
+        updates["OMDB_API_KEY"] = req.omdb_key
+    elif req.omdb_key == "" and "OMDB_API_KEY" in (req.model_fields_set or set()):
+        updates["OMDB_API_KEY"] = ""
+
+    if updates:
+        save_config(updates)   # writes file + updates os.environ in-place
+
+    # Re-instantiate API clients so the new keys take effect immediately
+    # without needing an app restart.
+    old_tmdb = tmdb
+    old_omdb = omdb
+    tmdb = TMDbClient()
+    omdb = OMDbClient()
+    await old_tmdb.close()
+    await old_omdb.close()
+
+    status = read_config_status()
+    return {
+        "success": True,
+        "tmdb_key_set": status.get("TMDB_API_KEY", False),
+        "omdb_key_set": status.get("OMDB_API_KEY", False),
+        "omdb_enabled": omdb.enabled,
+    }
+
+
 @app.on_event("shutdown")
 async def shutdown():
     await tmdb.close()
     await tvmaze.close()
+    await omdb.close()

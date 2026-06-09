@@ -19,11 +19,12 @@ let focusedIdx = null;   // keyboard-focused row (DEL/arrow navigation)
 const $ = s => document.querySelector(s);
 const $id = s => document.getElementById(s);
 
-const elScanPath  = $id("scan-path");
-const elRecursive = $id("recursive");
-const elTemplate  = $id("template");
-const elSource    = $id("datasource");
-const elAction    = $id("action");
+const elScanPath    = $id("scan-path");
+const elRecursive   = $id("recursive");
+const elTemplate    = $id("template");
+const elSource      = $id("datasource");
+const elAction      = $id("action");
+const elIncludeAdult = $id("include-adult");
 
 const btnScan   = $id("btn-scan");
 const btnBrowse = $id("btn-browse");
@@ -233,41 +234,6 @@ function showLocateDialog(filenames) {
 
     locateGo.addEventListener("click", go);
     locateInput.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
-}
-
-function showSelectionDialog(groupName, candidates, filesToMatch) {
-    modalTitle.textContent = "Select best match for \"" + groupName + "\"";
-    
-    let html = `<p style="color:var(--txt2);margin-bottom:12px;font-size:12px">Multiple matches found. Select the correct show:</p>`;
-    html += `<div class="candidate-list">`;
-    
-    for (const c of candidates) {
-        const year = c.year ? ` (${c.year})` : "";
-        const rating = c.rating ? ` ⭐ ${c.rating.toFixed(1)}` : "";
-        const poster = c.poster ? `<img src="${esc(c.poster)}" style="width:40px;height:60px;object-fit:cover;border-radius:4px;">` : 
-                                   `<div style="width:40px;height:60px;background:var(--glass-hover);border-radius:4px;"></div>`;
-        const overview = c.overview ? `<div style="font-size:10px;color:var(--txt3);margin-top:4px;line-height:1.4">${esc(c.overview)}</div>` : "";
-        
-        html += `<div class="candidate-item" data-id="${c.id}" data-name="${esc(c.name)}">
-            ${poster}
-            <div style="flex:1;min-width:0;">
-                <div style="font-weight:500;font-size:12px;color:var(--txt)">${esc(c.name)}${year}${rating}</div>
-                ${overview}
-            </div>
-            <button class="glass-btn btn-scan" onclick="R.selectShow(${c.id}, '${esc(c.name).replace(/'/g, "\\'")}', event)" style="padding:4px 12px;font-size:11px">Select</button>
-        </div>`;
-    }
-    
-    html += `</div>`;
-    html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px">
-        <button class="glass-btn" onclick="modalOverlay.classList.add('hidden')" style="flex:1">Cancel</button>
-    </div>`;
-    
-    modalBody.innerHTML = html;
-    modalOverlay.classList.remove("hidden");
-    
-    // Store filesToMatch for the selection callback
-    window._pendingMatchFiles = filesToMatch;
 }
 
 function showSelectionDialog(groupName, candidates, filesToMatch) {
@@ -700,6 +666,7 @@ async function doMatch() {
                 files: filesToMatch,
                 datasource: elSource.value,
                 template: elTemplate.value,
+                include_adult: elIncludeAdult.checked,
             }),
         });
 
@@ -802,6 +769,125 @@ function showRenameResults(data) {
     }
     modalBody.innerHTML = html;
     modalOverlay.classList.remove("hidden");
+}
+
+/* ─── Settings ────────────────────────────────────────────── */
+const btnSettings = $id("btn-settings");
+btnSettings.addEventListener("click", showSettings);
+
+async function showSettings() {
+    modalTitle.textContent = "API Key Settings";
+    modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:var(--txt3)">Loading…</div>`;
+    modalOverlay.classList.remove("hidden");
+
+    let current;
+    try {
+        current = await api("/api/settings");
+    } catch {
+        modalBody.innerHTML = `<p style="color:var(--red);font-size:12px">Failed to load settings.</p>`;
+        return;
+    }
+
+    const tmdbSet  = current.tmdb_key_set;
+    const omdbSet  = current.omdb_key_set;
+    const cfgFile  = current.config_file || "";
+
+    const badge = set => set
+        ? `<span class="settings-badge ok">● Active</span>`
+        : `<span class="settings-badge missing">○ Not set</span>`;
+
+    modalBody.innerHTML = `
+        <p style="color:var(--txt3);font-size:11px;margin-bottom:16px;line-height:1.6">
+            Keys are saved to <code class="settings-path">${esc(cfgFile)}</code> and take
+            effect immediately — no restart needed.
+            Docker users: set them as environment variables in
+            <code>docker-compose.yml</code> instead.
+        </p>
+
+        <div class="settings-row">
+            <div class="settings-label">
+                <span>TMDb API key</span>${badge(tmdbSet)}
+            </div>
+            <p class="settings-hint">
+                Required for TV + movie metadata.
+                Get a free key at
+                <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer">themoviedb.org</a>.
+            </p>
+            <div class="settings-input-row">
+                <input type="password" id="set-tmdb" class="glass-input mono"
+                       placeholder="${tmdbSet ? "••••••••  (leave blank to keep current)" : "Paste key here…"}"
+                       autocomplete="off" spellcheck="false">
+                <button class="settings-eye" data-target="set-tmdb" title="Show/hide">👁</button>
+            </div>
+        </div>
+
+        <div class="settings-row">
+            <div class="settings-label">
+                <span>OMDb API key</span>${badge(omdbSet)}
+            </div>
+            <p class="settings-hint">
+                Enables IMDb data + adult-title fallback search. Free: 1,000 req/day.
+                Get a free key at
+                <a href="https://www.omdbapi.com/apikey.aspx" target="_blank" rel="noopener noreferrer">omdbapi.com</a>.
+            </p>
+            <div class="settings-input-row">
+                <input type="password" id="set-omdb" class="glass-input mono"
+                       placeholder="${omdbSet ? "••••••••  (leave blank to keep current)" : "Paste key here…"}"
+                       autocomplete="off" spellcheck="false">
+                <button class="settings-eye" data-target="set-omdb" title="Show/hide">👁</button>
+            </div>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+            <button class="glass-btn" onclick="modalOverlay.classList.add('hidden')" style="flex:1">Cancel</button>
+            <button class="glass-btn btn-scan" id="settings-save" style="flex:2">Save &amp; Apply</button>
+        </div>
+        <p id="settings-msg" style="font-size:11px;margin-top:10px;min-height:16px"></p>`;
+
+    // Show/hide toggles
+    modalBody.querySelectorAll(".settings-eye").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const inp = $id(btn.dataset.target);
+            inp.type = inp.type === "password" ? "text" : "password";
+        });
+    });
+
+    $id("settings-save").addEventListener("click", async () => {
+        const tmdbVal = $id("set-tmdb").value.trim();
+        const omdbVal = $id("set-omdb").value.trim();
+        const msg     = $id("settings-msg");
+
+        // Basic client-side length check (mirrors server-side validation)
+        for (const [label, val] of [["TMDb key", tmdbVal], ["OMDb key", omdbVal]]) {
+            if (val && (val.length < 8 || val.length > 256 || /\s/.test(val))) {
+                msg.style.color = "var(--red)";
+                msg.textContent = `${label}: must be 8–256 characters with no spaces.`;
+                return;
+            }
+        }
+
+        const saveBtn = $id("settings-save");
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Saving…";
+        msg.textContent = "";
+
+        try {
+            const result = await api("/api/settings", {
+                method: "POST",
+                body: JSON.stringify({ tmdb_key: tmdbVal, omdb_key: omdbVal }),
+            });
+            msg.style.color = "var(--green)";
+            msg.textContent = "✓ Saved. Keys are active for this session.";
+            saveBtn.textContent = "Saved!";
+            // Refresh badge status
+            setTimeout(() => showSettings(), 1200);
+        } catch (err) {
+            msg.style.color = "var(--red)";
+            msg.textContent = "Error: " + err.message;
+            saveBtn.disabled = false;
+            saveBtn.textContent = "Save & Apply";
+        }
+    });
 }
 
 /* ─── History ─────────────────────────────────────────────── */
@@ -932,33 +1018,43 @@ function renderLeft() {
 }
 
 /* ─── Render Right Pane (New Names) ───────────────────────── */
+const PENCIL_SVG = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
+
 function renderRight() {
     const matched = matchResults.filter(r => r && r.matched).length;
     rightCount.textContent = matched;
 
     if (matchResults.every(r => r === null)) {
-        rightList.innerHTML = `<div class="empty-right"><p>Click <strong>Match</strong> to look up metadata</p></div>`;
+        rightList.innerHTML = `<div class="empty-right"><p>Click <strong>Match</strong> to look up metadata</p><p class="drop-hint" style="margin-top:6px">Right-click or press F2 to name files manually</p></div>`;
         return;
     }
 
     let html = "";
     for (let i = 0; i < scannedFiles.length; i++) {
         const m = matchResults[i];
+
+        /* ── Not yet attempted (scan done, match not run) ── */
         if (!m) {
-            html += `<div class="row-item" data-idx="${i}">
+            html += `<div class="row-item" data-idx="${i}"
+                          onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
+                          oncontextmenu="R.showContextMenu(event, ${i}, 'right')"
+                          ondblclick="R.startInlineEdit(${i})">
                 <span class="row-text unmatched">—</span>
+                <button class="row-edit-btn" title="Set name manually (double-click or F2)"
+                        onclick="event.stopPropagation();R.startInlineEdit(${i})">${PENCIL_SVG}</button>
             </div>`;
             continue;
         }
 
+        /* ── Auto-matched or manually named ── */
         if (m.matched) {
-            const scoreClass = m.score >= 0.6 ? "score-hi" : "score-lo";
-            const poster = m.metadata?.poster
+            const isManual = !!m.manual;
+            const poster = (!isManual && m.metadata?.poster)
                 ? `<img src="${esc(m.metadata.poster)}" alt="">`
-                : fileIcon("matched");
-            
+                : fileIcon(isManual ? "edit" : "matched");
+
             let metaLine = "";
-            if (m.metadata?.show) {
+            if (!isManual && m.metadata?.show) {
                 const title = m.metadata.title || "";
                 const year = scannedFiles[i]?.year || "";
                 metaLine = `<div class="meta-detail" title="${esc(title)}">`;
@@ -967,7 +1063,7 @@ function renderRight() {
                 metaLine += ` • <span class="meta-ep">S${String(m.metadata.season||0).padStart(2,"0")}E${String(m.metadata.episode||0).padStart(2,"0")}</span>`;
                 if (title) metaLine += ` • <span class="meta-title">${esc(title)}</span>`;
                 metaLine += `</div>`;
-            } else if (m.metadata?.title) {
+            } else if (!isManual && m.metadata?.title) {
                 const year = m.metadata.year || "";
                 metaLine = `<div class="meta-detail"><span class="meta-show">${esc(m.metadata.title)}</span>`;
                 if (year) metaLine += ` <span class="meta-year">(${year})</span>`;
@@ -979,33 +1075,49 @@ function renderRight() {
                 ? (m.new_name || "")
                 : (m.preview || m.new_name || "");
 
+            const scoreTag = isManual
+                ? `<span class="tag manual">manual</span>`
+                : `<span class="tag ${m.score >= 0.6 ? "score-hi" : "score-lo"}">${Math.round(m.score * 100)}%</span>`;
+
             html += `<div class="row-item" data-idx="${i}" draggable="true"
                           onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
                           oncontextmenu="R.showContextMenu(event, ${i}, 'right')"
                           ondragstart="R.dragStart(event, ${i}, 'right')"
                           ondragover="R.dragOver(event, ${i}, 'right')"
                           ondrop="R.drop(event, ${i}, 'right')"
-                          ondragend="R.dragEnd(event)">
+                          ondragend="R.dragEnd(event)"
+                          ondblclick="R.startInlineEdit(${i})">
                 <div class="row-icon">${poster}</div>
                 <div style="flex:1;min-width:0;">
                     <span class="row-text newname" title="${esc(displayName)}">${esc(displayName)}</span>
                     ${metaLine}
                 </div>
                 <div class="row-tags">
-                    <span class="tag ${scoreClass}">${Math.round(m.score * 100)}%</span>
+                    ${scoreTag}
+                    <button class="row-edit-btn" title="Edit name (double-click or F2)"
+                            onclick="event.stopPropagation();R.startInlineEdit(${i})">${PENCIL_SVG}</button>
                 </div>
             </div>`;
-        } else {
-            html += `<div class="row-item" data-idx="${i}">
-                <span class="row-text unmatched">No match found</span>
-            </div>`;
+            continue;
         }
+
+        /* ── Match attempted, failed → prominent edit CTA ── */
+        html += `<div class="row-item row-unmatched-cta" data-idx="${i}"
+                      onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
+                      oncontextmenu="R.showContextMenu(event, ${i}, 'right')"
+                      ondblclick="R.startInlineEdit(${i})">
+            <div class="row-icon">${fileIcon("edit")}</div>
+            <span class="row-text unmatched">No match found</span>
+            <button class="row-edit-btn row-edit-btn-cta" title="Name this file manually"
+                    onclick="event.stopPropagation();R.startInlineEdit(${i})">${PENCIL_SVG} Edit</button>
+        </div>`;
     }
     rightList.innerHTML = html;
 
     // Row click → set keyboard focus
     rightList.querySelectorAll(".row-item[data-idx]").forEach(el => {
         el.addEventListener("click", e => {
+            if (e.target.closest(".row-edit-btn")) return;
             focusRow(parseInt(el.dataset.idx));
         });
     });
@@ -1061,8 +1173,14 @@ function showContextMenu(e, idx, pane) {
         html += `<div class="ctx-item" onclick="R.copyPath('${esc(f.path)}', event)">📋 Copy path</div>`;
         html += `<div class="ctx-item ctx-disabled">📁 Show in folder</div>`;
     }
-    if (pane === "right" && m && m.matched) {
-        html += `<div class="ctx-item" onclick="R.showMetadata(${idx})">ℹ️ View metadata</div>`;
+    if (pane === "right") {
+        html += `<div class="ctx-item" onclick="R.startInlineEdit(${idx});hideContextMenu()"><span>✏ Edit name manually</span><kbd>F2</kbd></div>`;
+        if (m && m.matched && !m.manual) {
+            html += `<div class="ctx-item" onclick="R.showMetadata(${idx})">ℹ️ View metadata</div>`;
+        }
+        if (m && m.matched && m.manual) {
+            html += `<div class="ctx-item" onclick="R.clearManual(${idx})">↺ Clear manual name</div>`;
+        }
     }
     
     contextMenu.innerHTML = html;
@@ -1100,6 +1218,13 @@ window.R = {
             status("Copied to clipboard");
             setTimeout(() => statusHide(), 1500);
         });
+    },
+    clearManual(idx) {
+        if (!matchResults[idx]?.manual) return;
+        matchResults[idx] = null;
+        renderRight();
+        renderGutter();
+        btnRename.disabled = !matchResults.some(r => r && r.matched);
     },
     showMetadata(idx) {
         const m = matchResults[idx];
@@ -1158,6 +1283,7 @@ window.R = {
                     files: filesToMatch,
                     datasource: elSource.value,
                     template: elTemplate.value,
+                    include_adult: elIncludeAdult.checked,
                     selected_show_id: showId,
                     selected_show_name: showName,
                 }),
@@ -1284,6 +1410,97 @@ window.R = {
             setTimeout(() => statusHide(), 3000);
         }
     },
+
+    /* ─── Manual rename (FileBot-style inline edit) ────────── */
+    startInlineEdit(idx) {
+        const f = scannedFiles[idx];
+        if (!f) return;
+
+        // Derive stem and extension from the original filename
+        const dotPos = f.filename.lastIndexOf(".");
+        const ext  = dotPos > 0 ? f.filename.slice(dotPos) : "";         // ".mkv"
+        const origStem = dotPos > 0 ? f.filename.slice(0, dotPos) : f.filename;
+
+        // Pre-fill with the existing manual/auto name if available
+        const m = matchResults[idx];
+        let prefill = origStem;
+        if (m && m.matched) {
+            const cur = m.new_name || f.filename;
+            const curDot = cur.lastIndexOf(".");
+            prefill = curDot > 0 ? cur.slice(0, curDot) : cur;
+        }
+
+        const rowEl = rightList.querySelector(`.row-item[data-idx="${idx}"]`);
+        if (!rowEl || rowEl.classList.contains("editing")) return;
+
+        rowEl.classList.add("editing");
+        rowEl.draggable = false;
+        rowEl.innerHTML = `
+            <div class="row-icon">${fileIcon("edit")}</div>
+            <div style="flex:1;min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden">
+                <input class="row-edit-input" type="text" spellcheck="false"
+                       value="${esc(prefill)}" title="Type a new filename stem — extension is kept automatically">
+                <span class="tag" style="flex-shrink:0;color:var(--txt3);font-size:10px">${esc(ext) || "(no ext)"}</span>
+            </div>
+            <button class="row-edit-confirm" title="Confirm (Enter)">✓</button>
+            <button class="row-edit-cancel-btn" title="Cancel (Esc)">✗</button>`;
+
+        const input = rowEl.querySelector(".row-edit-input");
+        input.focus();
+        input.select();
+
+        const commit  = () => R.commitInlineEdit(idx, input.value, ext);
+        const cancel  = () => renderRight();
+
+        input.addEventListener("keydown", e => {
+            // Prevent global shortcuts (Delete, Ctrl+A, Esc) from firing while typing
+            e.stopPropagation();
+            if (e.key === "Enter")  { e.preventDefault(); commit(); }
+            if (e.key === "Escape") { e.preventDefault(); cancel(); }
+        });
+        rowEl.querySelector(".row-edit-confirm").addEventListener("click",     e => { e.stopPropagation(); commit(); });
+        rowEl.querySelector(".row-edit-cancel-btn").addEventListener("click",  e => { e.stopPropagation(); cancel(); });
+
+        focusRow(idx);
+    },
+
+    commitInlineEdit(idx, rawStem, ext) {
+        // Sanitize: strip filesystem-forbidden chars, normalise whitespace, cap length
+        const stem = rawStem
+            .trim()
+            .replace(/[/\\:*?"<>|]/g, "_")   // forbidden on Win/Linux/macOS
+            .replace(/\.{2,}/g, ".")           // collapse consecutive dots
+            .replace(/^\.+|\.+$/g, "")         // no leading/trailing dot
+            .slice(0, 200);
+
+        if (!stem) { renderRight(); return; }   // empty → cancel
+
+        const newFilename = stem + ext;
+        const f = scannedFiles[idx];
+        const parentDir = f.path.lastIndexOf("/") > 0
+            ? f.path.slice(0, f.path.lastIndexOf("/"))
+            : ".";
+        const newPath = parentDir + "/" + newFilename;
+
+        matchResults[idx] = {
+            matched:  true,
+            manual:   true,
+            score:    1.0,
+            original: f.path,
+            new_name: newFilename,
+            new_path: newPath,
+            preview:  newFilename,
+            metadata: null,
+        };
+
+        renderRight();
+        renderGutter();
+        btnRename.disabled = !matchResults.some(r => r && r.matched);
+        focusRow(idx);
+
+        status(`Manual name set: ${newFilename}`);
+        setTimeout(() => statusHide(), 1800);
+    },
 };
 
 /* ─── Sync scroll between panes ───────────────────────────── */
@@ -1310,13 +1527,19 @@ document.querySelectorAll(".preset-btn").forEach(btn => {
 
 /* ─── Keyboard shortcuts ──────────────────────────────────── */
 document.addEventListener("keydown", e => {
-    // Delete: remove selected files
-    if (e.key === "Delete" && scannedFiles.length > 0) {
+    // F2: edit focused row name manually
+    if (e.key === "F2" && focusedIdx !== null && scannedFiles.length > 0) {
+        e.preventDefault();
+        R.startInlineEdit(focusedIdx);
+        return;
+    }
+    // Delete: remove selected files (skip when editing inline)
+    if (e.key === "Delete" && scannedFiles.length > 0 && !document.querySelector(".row-edit-input")) {
         e.preventDefault();
         removeSelected();
     }
     // Ctrl+A: select all
-    if (e.key === "a" && e.ctrlKey && scannedFiles.length > 0) {
+    if (e.key === "a" && e.ctrlKey && scannedFiles.length > 0 && !document.querySelector(".row-edit-input")) {
         e.preventDefault();
         selectedSet = new Set(scannedFiles.map((_, i) => i));
         renderLeft();
@@ -1399,6 +1622,12 @@ function fileIcon(type) {
     if (type === "movie") {
         return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2">
             <rect x="2" y="2" width="20" height="20" rx="3"/><circle cx="12" cy="12" r="4"/>
+        </svg>`;
+    }
+    if (type === "edit") {
+        return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
         </svg>`;
     }
     return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2">

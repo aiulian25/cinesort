@@ -568,6 +568,9 @@ updateActionHint(); // run once on load (after prefs restore so it reflects the 
 
 
 elScanPath.addEventListener("keydown", e => { if (e.key === "Enter") doScan(); });
+// The toolbar Scan button previously had no handler — clicking it did nothing
+// (scan only worked via Enter in the path field or the Browse dialog). Wire it.
+btnScan.addEventListener("click", doScan);
 
 /* ─── Browse ──────────────────────────────────────────────── */
 // Desktop builds (deb/AppImage) use the native OS picker, which reaches $HOME
@@ -1379,6 +1382,11 @@ function renderRight() {
     let html = "";
     for (let i = 0; i < scannedFiles.length; i++) {
         const m = matchResults[i];
+        // Show file size on every result row — matched OR not — so duplicates can
+        // be compared and the right copy kept. Source: scannedFiles[i].size (already
+        // returned by /api/scan and /api/scan-batch).
+        const fsize = scannedFiles[i]?.size;
+        const sizeTag = fsize ? `<span class="tag tag-size" title="File size">${fmt(fsize)}</span>` : "";
 
         /* ── Not yet attempted (scan done, match not run) ── */
         if (!m) {
@@ -1387,6 +1395,7 @@ function renderRight() {
                           oncontextmenu="R.showContextMenu(event, ${i}, 'right')"
                           ondblclick="R.startInlineEdit(${i})">
                 <span class="row-text unmatched">—</span>
+                <div class="row-tags">${sizeTag}</div>
                 <button class="row-edit-btn" title="Set name manually (double-click or F2)"
                         onclick="event.stopPropagation();R.startInlineEdit(${i})">${PENCIL_SVG}</button>
             </div>`;
@@ -1447,6 +1456,7 @@ function renderRight() {
                     ${metaLine}
                 </div>
                 <div class="row-tags">
+                    ${sizeTag}
                     ${scoreTag}
                     <button class="row-edit-btn" title="Edit name (double-click or F2)"
                             onclick="event.stopPropagation();R.startInlineEdit(${i})">${PENCIL_SVG}</button>
@@ -1462,6 +1472,7 @@ function renderRight() {
                       ondblclick="R.startInlineEdit(${i})">
             <div class="row-icon">${fileIcon("edit")}</div>
             <span class="row-text unmatched">No match found</span>
+            <div class="row-tags">${sizeTag}</div>
             <button class="row-edit-btn row-edit-btn-cta" title="Name this file manually"
                     onclick="event.stopPropagation();R.startInlineEdit(${i})">${PENCIL_SVG} Edit</button>
         </div>`;
@@ -1953,6 +1964,23 @@ rightList.addEventListener("scroll", () => {
     scrolling = true;
     leftList.scrollTop = rightList.scrollTop;
     requestAnimationFrame(() => { scrolling = false; });
+});
+
+/* ─── Go to top (appears when the list is scrolled; both panes scroll in sync) ─ */
+const btnGoTop = $id("go-top");
+const GO_TOP_THRESHOLD = 300;  // px scrolled before the button appears
+function updateGoTop() {
+    if (!btnGoTop) return;
+    const scrolled = Math.max(leftList.scrollTop, rightList.scrollTop);
+    btnGoTop.classList.toggle("visible", scrolled > GO_TOP_THRESHOLD);
+}
+leftList.addEventListener("scroll", updateGoTop);
+rightList.addEventListener("scroll", updateGoTop);
+btnGoTop?.addEventListener("click", () => {
+    // Scrolling the left pane smoothly drags the right pane along via the sync
+    // handler above; scroll both explicitly so it works regardless of focus.
+    leftList.scrollTo({ top: 0, behavior: "smooth" });
+    rightList.scrollTo({ top: 0, behavior: "smooth" });
 });
 
 /* ─── Template presets ────────────────────────────────────── */

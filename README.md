@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies and TV shows us
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.2.5-green.svg)
+![Version](https://img.shields.io/badge/version-1.2.6-green.svg)
 
 ---
 
@@ -69,20 +69,22 @@ docker compose up -d
 
 Open **http://localhost:8888** in your browser.
 
+> 🧩 **Multi-arch image — just pull, never build.** `aiulian25/cinesort:latest` is published as a multi-arch manifest covering **`linux/amd64`** and **`linux/arm64`**, so it runs out-of-the-box on x86 PCs/mini-PCs/servers **and** ARM devices (Synology DSM 7+, Raspberry Pi 4/5, Apple-silicon Docker). Docker automatically pulls the right architecture — no `--platform` flag and no local build required.
+
 ### Desktop (deb / AppImage)
 
 Download the latest release from the [Releases page](https://github.com/aiulian25/cinesort/releases).
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.2.5_amd64.deb
+sudo dpkg -i cinesort_1.2.6_amd64.deb
 cinesort                    # or launch from your application menu
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.2.5.AppImage
-./CineSort-1.2.5.AppImage
+chmod +x CineSort-1.2.6.AppImage
+./CineSort-1.2.6.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -429,7 +431,8 @@ volumes:
 |------|--------|
 | **Docker base** | Python 3.11 (Debian slim) |
 | **Image size** | ~180 MB |
-| **Architecture** | amd64 (x86_64) |
+| **Docker architectures** | `linux/amd64` + `linux/arm64` (multi-arch manifest) |
+| **Desktop architectures** | amd64 / x86_64 (deb + AppImage) |
 | **Runtime** | FastAPI + Uvicorn |
 | **RAM usage** | ~150 MB |
 | **Desktop shell** | Electron 35 |
@@ -472,6 +475,12 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## 📦 Changelog
+
+### v1.2.6
+- **Multi-arch Docker image** — `aiulian25/cinesort` is now published as a `linux/amd64` + `linux/arm64` manifest, so Synology/ARM users can pull and run it directly (no local build, no `--platform`).
+- **File size on every result row** — after Match, each row in the New Names pane shows its file size (matched *and* unmatched), so you can compare duplicates and keep the right copy.
+- **Go-to-top button** — appears once the file list is scrolled; jumps both panes back to the top.
+- **Fix:** the toolbar **Scan** button now works when clicked (previously only Enter-in-path or Browse triggered a scan).
 
 ### v1.2.5
 - **AppImage no longer shadows a deb install** — when a system (deb) install is detected, the AppImage skips self-registering its menu entry (and removes any stale one it left before), fixing "won't launch from the menu". It also stages itself to `~/.local/bin/CineSort.AppImage` so moving/deleting the downloaded file doesn't break the launcher.

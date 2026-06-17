@@ -47,7 +47,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.2.5")
+app = FastAPI(title="CineSort", version="1.2.6")
 
 
 class NoCacheStaticFiles(StaticFiles):

@@ -55,6 +55,7 @@ test_media/
 
 # Claude Code / local agent working files
 .claude/
+prompt.txt
 
 # Docker
 docker-compose.override.yml

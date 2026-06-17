@@ -48,6 +48,18 @@ net/
 package.json
 package-lock.json
 
+# Compose files — never copied into the image, and the dev one may hold local keys
+docker-compose*.yml
+
+# Secrets / local config — must never enter the image
+.env
+*.env
+keys.env
+.npmrc
+
+# Agent / local working files
+.claude/
+
 # Logs and temp files
 *.log
 *.pid

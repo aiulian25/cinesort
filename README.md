@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies and TV shows us
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.2.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.2.5-green.svg)
 
 ---
 
@@ -15,30 +15,42 @@ CineSort automatically detects, matches, and renames your movies and TV shows us
 
 ### Core
 - 🎯 **Smart Detection** — Automatically detects movies and TV shows from filenames (season, episode, year, quality tags, release group)
-- 🔍 **Multi-Source Metadata** — TMDb, TVMaze, and OMDb (IMDb) with automatic fallback
-- 📝 **Flexible Renaming** — Multiple naming templates (Plex, Jellyfin, Emby, custom), including flat in-place mode
+- 🔍 **Multi-Source Metadata** — TMDb, TVMaze, and OMDb (IMDb), merged and ranked by confidence
+- 📝 **Flexible Renaming** — Template-based naming with a token palette and **live preview**, including flat in-place mode
 - ✏️ **Rename In-Place** — Rename files without moving them — works on NAS/SMB shares
 - 🔗 **Multiple Actions** — Rename, Move, Copy, Hard Link, Symlink, Dry-run (Test)
 
 ### Matching
+- 📊 **Cascade scoring + breakdown** — Multi-metric confidence score (name, year, S×E, absolute) with `original_title` awareness; the **View metadata** dialog shows *why* a match was chosen
+- 🟢🟡🔴 **Confidence gate** — High / Review / Low tiers; matches below 40% are flagged **review** and are **not** auto-selected for renaming, so a weak guess can never rename a file by accident
+- 🔁 **Smart fallback search** — Retries with the year dropped, then progressively trimmed titles, so noisy filenames still match
+- 🌀 **Anime / absolute numbering** — Cumulative absolute episode numbers are computed and matched
+- 📅 **Year disambiguation** — Auto-resolves same-named shows when the filename carries a year (skips an unnecessary prompt)
 - 🎬 **Adult-title support** — Optional Adult toggle unlocks TMDB results filtered by default; OMDb never filters
-- 🏷️ **OMDb / IMDb source** — Falls back automatically to IMDb data when TMDB returns no results (e.g. niche or adult titles)
-- 📊 **Cascade scoring** — Multi-metric confidence score (name similarity, year, S×E) with `original_title` awareness
 - ✋ **Manual rename** — FileBot-style inline edit when auto-match fails: double-click, F2, or right-click → Edit
 
 ### UI / UX
-- 📁 **Folder Browser** — Server-side folder navigation with multi-select
-- 🖱️ **Drag & Drop** — Drop files or folders directly onto the left pane (fixed on deb/AppImage, Wayland-aware)
+- 🎨 **Three themes** — **Dark** (default), **Light**, and **Aurora** (a neon-glass theme); switch in ⚙ Settings → Appearance, remembered per device
+- 📁 **Folder picker** — Native OS file/folder picker on desktop (reaches your whole filesystem); a rich in-app browser on Docker/web with a shortcuts sidebar, editable path + breadcrumb, type-ahead filter, "media only" toggle, cross-folder multi-select, and full keyboard navigation
+- 🧰 **Template builder** — Insert `{tokens}` from a palette and see a live preview of the resulting path
+- ⚡ **Bulk selection** — One-click "Matched", "≥60%", and "Clear unmatched"
+- ⚠️ **Inline conflict resolution** — Resolve duplicate/exists conflicts in place with **Skip** or **Rename → (2)**
+- 🖱️ **Drag & Drop** — Drop files or folders directly onto the left pane (deb/AppImage, Wayland-aware)
 - 🔄 **Row reordering** — Drag rows to manually remap files to matches
-- ✅ **Batch Operations** — Checkboxes + Ctrl+A select-all
 - 🗑️ **Per-file Removal** — DEL key or right-click → Remove
-- 📊 **Rename History** — Full log with undo support
+- 📂 **Show in folder** — Reveal the original file in your file manager (desktop)
+- 💾 **Remembers your setup** — Source, action, template, and last folder persist between sessions
+- 📊 **Rename History** — Full log with per-operation undo; native confirm dialogs replaced with themed ones
+- ♿ **Accessible** — ARIA roles + visible keyboard focus rings on lists and controls
 - ⚙️ **Settings Panel** — Enter API keys in-app; no terminal required for desktop installs
-- 🎨 **Modern Web UI** — Glassmorphic dark theme with action hint banners
 
-### Platform
+### Platform & reliability
 - 🐳 **Docker Native** — ~180 MB image, runs anywhere
 - 🖥️ **Desktop App** — `.deb` and AppImage packages for Linux (Electron shell)
+- 🔌 **Conflict-free launch** — Picks a free port automatically, so a stale/duplicate instance can never block startup
+- 🖼️ **Reliable rendering on Linux** — Software compositing avoids the all-black-window issue seen on Wayland/Intel (override with `CINESORT_ENABLE_GPU=1`)
+- 🔁 **Always-fresh UI** — Static assets sent with `Cache-Control: no-cache`, so a rebuilt container never serves stale JavaScript
+- 🤝 **No launcher collisions** — The AppImage won't shadow a deb install's menu entry, and stages itself to a stable path
 - 🔒 **Secure** — Non-root container, 0600 key file, contextIsolation, no eval
 - 🌐 **NAS/SMB Ready** — Actionable error messages for network mount limitations
 
@@ -63,14 +75,14 @@ Download the latest release from the [Releases page](https://github.com/aiulian2
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.2.0_amd64.deb
+sudo dpkg -i cinesort_1.2.5_amd64.deb
 cinesort                    # or launch from your application menu
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.2.0.AppImage
-./CineSort-1.2.0.AppImage
+chmod +x CineSort-1.2.5.AppImage
+./CineSort-1.2.5.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -167,6 +179,8 @@ Restart the app for changes to take effect when editing the file manually.
 | `OMDB_API_KEY` | *(none)* | OMDb API key; OMDb is silently disabled without it |
 | `CINESORT_HOST` | `0.0.0.0` | Server bind address |
 | `CINESORT_PORT` | `8888` | Server port |
+| `CINESORT_BROWSE_ROOTS` | *(none)* | Extra folders the in-app browser may expose, in addition to `/mnt` and `/media` (`:`-separated, e.g. `/srv/tv:/srv/movies`). Only add paths you also mount. Shown as quick-access shortcuts. |
+| `CINESORT_ENABLE_GPU` | *(unset)* | Desktop only: set to `1` to re-enable GPU hardware acceleration (disabled by default on Linux to avoid black-window issues) |
 
 ### Volume Mounts
 
@@ -204,7 +218,9 @@ volumes:
 ### 1. Scan files
 
 - Enter a folder path in the scan bar, or **drag & drop** files/folders onto the left pane
-- Use **Browse** for server-side folder navigation with checkbox multi-select
+- Click **Browse**:
+  - **Desktop (deb/AppImage):** opens your native OS picker — choose folders or files anywhere on the machine
+  - **Docker / web:** opens the in-app browser — shortcuts sidebar, editable path/breadcrumb, type-ahead filter, "media only" toggle, and checkbox multi-select that **persists across folders**; navigate with ↑/↓, Space to select, Enter to open, Backspace to go up
 - Toggle **Recursive** to include sub-folders
 - Click **Scan**
 
@@ -236,7 +252,7 @@ When a file shows **No match found** in the right pane:
 | **Anime** | `{n}/{n} - {absolute} - {t}` | Absolute-numbered anime |
 | **Flat** | `{n} - {s00e00} - {t}` | Rename in-place, no folders |
 
-Or type your own using `{n}`, `{y}`, `{s}`, `{e}`, `{s00e00}`, `{t}`, `{absolute}`, `{source}`, `{vf}`, `{group}`.
+Or build your own: type tokens directly, or click them from the **token palette** under the template field — a **live preview** shows the resulting path for the first file as you edit. Available tokens: `{n}`, `{y}`, `{s}`, `{e}`, `{s00e00}`, `{t}`, `{absolute}`, `{source}`, `{vf}`, `{group}`.
 
 ### 5. Choose an action
 
@@ -251,10 +267,17 @@ Or type your own using `{n}`, `{y}`, `{s}`, `{e}`, `{s00e00}`, `{t}`, `{absolute
 
 ### 6. Review and rename
 
+- Check the confidence tier on each match — **High** (green), **Review** (amber, <60%), **Low** (red, <40%, auto-deselected)
+- Use the bulk buttons above the list to quickly select **Matched**, **≥60%**, or **Clear unmatched**
 - Uncheck any rows you want to skip
 - Click **Rename**
+- If any **conflicts** are found (duplicate destination / file already exists), resolve them inline with **Skip** or **Rename → (2)**
 - Results are shown immediately; failures include the reason
 - All operations are recorded in **History** (top-right button) with per-operation **Undo**
+
+### Change the theme
+
+Open **⚙ Settings → Appearance** and pick **Dark**, **Light**, or **Aurora**. The choice applies instantly and is remembered on this device.
 
 ---
 
@@ -271,6 +294,25 @@ echo $XDG_SESSION_TYPE
 # Run from terminal to see errors
 /opt/CineSort/cinesort --no-sandbox
 ```
+
+### Desktop app shows a black window (Linux)
+
+As of v1.2.4 the desktop app uses software compositing on Linux, which fixes the all-black-window issue seen on some Wayland/Intel setups. If your GPU renders fine and you want hardware acceleration back, launch with:
+```bash
+CINESORT_ENABLE_GPU=1 /opt/CineSort/cinesort
+```
+
+### Desktop app won't launch from the app menu (spinner, then nothing)
+
+Almost always a **stale `.desktop` entry** — e.g. you ran the AppImage once (it self-registers a launcher), then moved/deleted that AppImage, and its user-local entry now shadows the deb's and points at a missing file. Fix:
+```bash
+# Inspect what the menu entry runs:
+gtk-launch cinesort
+# Remove a stale user-local entry so the deb's entry is used:
+rm -f ~/.local/share/applications/cinesort.desktop
+update-desktop-database ~/.local/share/applications
+```
+v1.2.5+ AppImages detect an installed deb and no longer create a shadowing entry. (Running from a terminal — `/opt/CineSort/cinesort` — bypasses the menu entry and always works.)
 
 ### OMDb source is greyed out / returns nothing
 
@@ -431,6 +473,28 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## 📦 Changelog
 
+### v1.2.5
+- **AppImage no longer shadows a deb install** — when a system (deb) install is detected, the AppImage skips self-registering its menu entry (and removes any stale one it left before), fixing "won't launch from the menu". It also stages itself to `~/.local/bin/CineSort.AppImage` so moving/deleting the downloaded file doesn't break the launcher.
+
+### v1.2.4
+- **Conflict-free launch** — the desktop app now resolves a free port at startup instead of hardcoding one, so a leftover/duplicate instance can no longer cause "fails to launch" (`address already in use`).
+
+### v1.2.3
+- **Black-window fix (Linux)** — disables GPU compositing by default on Linux (Wayland/Intel and others rendered an all-black window). Override with `CINESORT_ENABLE_GPU=1`.
+- **Browse opens at a real root** — the in-app browser now opens at the first existing mounted volume (e.g. `/media`) instead of a hardcoded `/mnt` that may not exist in your container.
+- **Always-fresh assets** — `Cache-Control: no-cache` on the web UI so a rebuilt container never serves stale JavaScript (one hard refresh needed the first time).
+
+### v1.2.2
+- **Three themes** — added **Light** and **Aurora** (neon-glass) alongside Dark, with a live theme picker in ⚙ Settings → Appearance (remembered per device).
+- **Fixed non-working modal buttons** — Cancel / Close / Done in Settings, History, and dialogs now work (they were broken by a scope bug).
+- **Themed confirm dialogs** — replaced the off-theme native `confirm()` popups (Clear History, Undo) with in-app themed dialogs.
+- **Consistent dropdown colours** — the Source `<select>` menu now matches the theme.
+
+### v1.2.1
+- **Better folder & file selection** — native OS picker on deb/AppImage; the in-app browser gained a shortcuts sidebar, editable path + breadcrumb, type-ahead filter, "media only" toggle, selection that persists across folders, and keyboard navigation. New `CINESORT_BROWSE_ROOTS` env var for extra browsable roots.
+- **Better matching** — confidence gate (low-confidence matches flagged "review" and not auto-selected) with a three-tier colour legend; per-metric **match breakdown** in View metadata; fallback search queries; cross-source movie merge; O(1) exact-episode matching; real absolute (anime) numbering; year-based show disambiguation.
+- **UI polish** — template token palette + live preview; bulk select (Matched / ≥60% / Clear unmatched); inline conflict resolution (Skip / Rename → (2)); "Show in folder" on desktop; remembers last-used source/action/template/folder; accessibility roles + focus rings; elapsed-time indicator during long matches.
+
 ### v1.2.0
 - **OMDb / IMDb source** — third metadata source backed by IMDb data; falls back automatically when TMDb returns no results. Requires a free API key (1,000 req/day).
 - **Adult-title support** — Adult checkbox in the toolbar passes `include_adult=true` to TMDb; OMDb never filters.
@@ -461,413 +525,6 @@ MIT License — see [LICENSE](LICENSE) for details.
 - **FastAPI** — Modern Python web framework
 - **Electron** — Cross-platform desktop shell
 - **Docker** — Containerization platform
-
----
-
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/aiulian25/cinesort/issues)
-- **Docker Hub**: [aiulian25/cinesort](https://hub.docker.com/r/aiulian25/cinesort)
-
----
-
-**Made with ❤️ for media enthusiasts**
-
-
----
-
-## ✨ Features
-
-- 🎯 **Smart Detection** - Automatically detects movies and TV shows from filenames
-- 🔍 **Metadata Matching** - Fetches accurate metadata from TMDb and TVMaze
-- 📝 **Flexible Renaming** - Multiple naming templates (Plex, Jellyfin, Emby, custom)
-- ✏️ **Rename In-Place** - Rename files without moving them — works on NAS/SMB shares
-- 📁 **Folder Browser** - Server-side folder navigation with multi-select support
-- ✅ **Batch Operations** - Select multiple files with checkboxes or Ctrl+A
-- 🗑️ **Per-file Removal** - Remove individual files from the list with DEL key or right-click
-- 📊 **Rename History** - Track all rename operations with undo support
-- 🎨 **Modern Web UI** - Beautiful glassmorphic dark theme with action hint banners
-- 🐳 **Docker Native** - 180MB image, runs anywhere
-- 🔒 **Secure** - Runs as non-root user with configurable PUID/PGID
-- 🆓 **Free APIs** - No registration required (optional TMDb API key for heavy use)
-- 🌐 **NAS/SMB Ready** - Actionable error messages for network mount limitations
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Docker and Docker Compose installed
-- Media files on your host system
-
-### Installation
-
-1. **Create directory and download docker-compose.yml**:
-```bash
-mkdir -p ~/cinesort && cd ~/cinesort
-wget https://raw.githubusercontent.com/aiulian25/cinesort/main/docker-compose.yml
-```
-
-2. **Edit docker-compose.yml** to configure your media directories:
-```bash
-nano docker-compose.yml  # or use your preferred editor
-```
-
-Update the volumes section with your media paths:
-```yaml
-volumes:
-  - cinesort-data:/data
-  - /your/media/path:/media  # Change this to your actual media directory
-```
-
-3. **Start CineSort**:
-```bash
-docker compose up -d
-```
-
-4. **Access the web interface**:
-```
-http://localhost:8888
-```
-
-That's it! 🎉
-
----
-
-## 📋 Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PUID` | `1000` | User ID for file permissions (match your host user) |
-| `PGID` | `1000` | Group ID for file permissions (match your host group) |
-| `TMDB_API_KEY` | *(provided)* | Optional: Custom TMDb API key ([get yours here](https://www.themoviedb.org/settings/api)) |
-| `CINESORT_HOST` | `0.0.0.0` | Server bind address |
-| `CINESORT_PORT` | `8888` | Server port |
-
-### Finding Your PUID/PGID
-
-On your host system, run:
-```bash
-id -u  # Returns PUID
-id -g  # Returns PGID
-```
-
-Update docker-compose.yml:
-```yaml
-environment:
-  - PUID=1000  # Your user ID
-  - PGID=1000  # Your group ID
-```
-
-### Volume Mounts
-
-**Required volumes**:
-- `/data` - Persistent storage for rename history and configuration
-- Media directories - Mount your movies/TV shows (can be multiple)
-
-**Example configurations**:
-
-**Single media directory**:
-```yaml
-volumes:
-  - cinesort-data:/data
-  - /mnt/media:/media
-```
-
-**Multiple directories**:
-```yaml
-volumes:
-  - cinesort-data:/data
-  - /mnt/movies:/media/movies
-  - /mnt/tv:/media/tv
-  - /mnt/downloads:/media/downloads
-```
-
-**Network mounts** (NFS/SMB):
-```yaml
-volumes:
-  - cinesort-data:/data
-  - /mnt/nas:/media:rw  # :rw for read-write access
-```
-
----
-
-## 📖 Usage Guide
-
-### 1. **Scan Directory**
-- Click the **Browse** button or enter a path manually
-- Navigate through folders with server-side browser
-- Select files/folders with checkboxes or Ctrl+A
-- Click **Scan Selected** to detect media files
-
-### 2. **Review Matches**
-- CineSort displays detected metadata with confidence scores
-- Green badges (High) indicate strong matches
-- Yellow badges (Medium/Low) may need manual verification
-- Poster images help confirm correct matches
-
-### 3. **Select Naming Template**
-Choose from pre-configured templates:
-- **Plex**: `Movie Title (Year).ext` / `Show Title - S01E02 - Episode Title.ext`
-- **Jellyfin**: `Movie Title [imdbid-tt1234567].ext`
-- **Emby**: Similar to Jellyfin
-- **Simple**: Basic title-based naming
-- **Custom**: Define your own pattern
-
-### 4. **Preview & Execute**
-- Review new filenames in the preview
-- Uncheck any files you don't want to rename
-- Click **Execute Rename** to apply changes
-- All operations are logged in rename history
-
-### 5. **History & Undo**
-- View rename history with timestamps
-- Undo operations if needed
-- Export history for records
-
----
-
-## 🎨 Folder Browser
-
-The built-in folder browser provides:
-- **Server-side navigation** - Secure browsing of mounted directories
-- **Multi-select** - Checkboxes for individual selection
-- **Batch select** - "Select All" / "Deselect All" buttons
-- **Keyboard shortcuts** - Ctrl+A to select all
-- **Breadcrumb navigation** - Click to jump to parent folders
-- **Restricted access** - Only browses `/media` and `/mnt` directories
-
----
-
-## 🛠️ Docker Compose Examples
-
-### Basic Setup
-```yaml
-services:
-  cinesort:
-    image: aiulian25/cinesort:latest
-    container_name: cinesort
-    ports:
-      - "8888:8888"
-    environment:
-      - PUID=1000
-      - PGID=1000
-    volumes:
-      - cinesort-data:/data
-      - /path/to/media:/media
-    restart: unless-stopped
-
-volumes:
-  cinesort-data:
-```
-
-### Advanced Setup (with resource limits)
-```yaml
-services:
-  cinesort:
-    image: aiulian25/cinesort:latest
-    container_name: cinesort
-    ports:
-      - "8888:8888"
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TMDB_API_KEY=your_api_key_here
-    volumes:
-      - cinesort-data:/data
-      - /mnt/movies:/media/movies
-      - /mnt/tv:/media/tv
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 1G
-        reservations:
-          memory: 256M
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-volumes:
-  cinesort-data:
-```
-
----
-
-## 🔧 API Information
-
-### TMDb (The Movie Database)
-- **Default**: Free API key included for testing
-- **Rate Limits**: Generous limits for personal use
-- **Custom Key**: Recommended for heavy use - [register here](https://www.themoviedb.org/settings/api)
-- **No Expiration**: Free keys don't expire (unless abused)
-
-### TVMaze
-- **No API key required** - Completely free
-- **No rate limits** for reasonable use
-- **TV show metadata** - Episode titles, air dates, summaries
-
----
-
-## 🐛 Troubleshooting
-
-### Permission Denied Errors
-
-**Problem**: `[Errno 13] Permission denied` when renaming files
-
-**Solutions**:
-1. Match PUID/PGID to your host user:
-   ```bash
-   id -u && id -g  # Get your user/group IDs
-   ```
-   
-2. For network mounts (NFS/CIFS), add `:rw` flag:
-   ```yaml
-   volumes:
-     - /mnt/nas:/media:rw
-   ```
-
-3. Check file ownership on host:
-   ```bash
-   ls -la /path/to/media
-   ```
-
-### Container Won't Start
-
-**Check logs**:
-```bash
-docker logs cinesort
-```
-
-**Common issues**:
-- Port 8888 already in use (change in docker-compose.yml)
-- Volume mount paths don't exist
-- Invalid PUID/PGID values
-
-### Cannot Access Web UI
-
-1. Verify container is running:
-   ```bash
-   docker ps | grep cinesort
-   ```
-
-2. Check container health:
-   ```bash
-   docker inspect cinesort | grep -i health
-   ```
-
-3. Test connectivity:
-   ```bash
-   curl http://localhost:8888
-   ```
-
-### Folder Browser Shows Empty
-
-- Ensure media directories are properly mounted
-- Check container has read access:
-  ```bash
-  docker exec cinesort ls -la /media
-  ```
-
----
-
-## 📊 Technical Details
-
-**Image Specifications**:
-- **Base**: Python 3.11 (Debian slim)
-- **Size**: ~180MB
-- **Architecture**: amd64 (x86_64)
-- **Runtime**: FastAPI + Uvicorn
-- **Memory**: ~150MB RAM usage
-- **User**: Runs as non-root (UID 1000 by default)
-
-**Health Check**:
-- Endpoint: `GET /`
-- Interval: 30 seconds
-- Timeout: 3 seconds
-- Retries: 3
-
-**Security**:
-- No root privileges required
-- Sandboxed file access (only mounted directories)
-- API key management via environment variables
-- No hardcoded credentials
-
----
-
-## 🎯 Naming Templates
-
-### Plex Format
-**Movies**: `Movie Title (Year).ext`
-- Example: `The Matrix (1999).mkv`
-
-**TV Shows**: `Show Title - S01E02 - Episode Title.ext`
-- Example: `Breaking Bad - S01E01 - Pilot.mkv`
-
-### Jellyfin Format
-**Movies**: `Movie Title [imdbid-tt1234567].ext`
-**TV Shows**: `Show Title [tvdbid-123456] - S01E02 - Episode Title.ext`
-
-### Simple Format
-**Movies**: `Movie Title (Year).ext`
-**TV Shows**: `Show Title S01E02.ext`
-
----
-
-## 🚦 Building from Source
-
-If you want to build the image yourself instead of using the pre-built one:
-
-```bash
-git clone https://github.com/aiulian25/cinesort.git
-cd cinesort
-docker build -t cinesort:latest .
-docker compose up -d
-```
-
----
-
-## 📝 Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
----
-
-## 📜 License
-
-MIT License - see [LICENSE](LICENSE) file for details
-
----
-
-## � Changelog
-
-### v1.1.0
-- **Rename In-Place action** — renames files using an atomic OS rename, keeping them in their current folder. No new directories are ever created. Works on SMB/NFS/NAS mounts.
-- **Per-file removal** — remove individual files from the scan list with the `Del` key or right-click → "Remove from list". Arrow keys navigate between rows.
-- **Action hint banner** — colour-coded description of what each action (Rename, Move, Copy, etc.) will do before you commit.
-- **Flat template preset** — one-click preset with no path separators, safe for in-place renaming.
-- **Improved SMB error handling** — `EOPNOTSUPP`, `EXDEV`, `EACCES`, `ENOSPC` now surface as clear, actionable messages instead of raw Python tracebacks.
-
-### v1.0.0
-- Initial public release
-
----
-
-## �🙏 Acknowledgments
-
-- **TMDb** - Movie and TV metadata (https://www.themoviedb.org/)
-- **TVMaze** - TV show information (https://www.tvmaze.com/)
-- **FastAPI** - Modern Python web framework
-- **Docker** - Containerization platform
 
 ---
 

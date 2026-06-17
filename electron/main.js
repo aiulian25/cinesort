@@ -1,9 +1,10 @@
-const { app, BrowserWindow, dialog, nativeImage } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require("electron");
 const { spawn, execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const http = require("http");
+const net = require("net");
 
 // ── Linux sandbox & Wayland fix ───────────────────────────────────────────────
 // Must be called BEFORE app.whenReady().
@@ -25,12 +26,89 @@ if (process.platform === "linux") {
     // through Xorg which handles Optimus transparently, and drag-and-drop
     // works correctly because Electron and the file manager share the same
     // X11 surface. The no-sandbox flag above already fixes DnD path access.
+    //
+    // ── Black-window fix ──────────────────────────────────────────────────────
+    // Under XWayland, GPU compositing produces an all-black window on many
+    // Linux/Wayland setups (Intel + Wayland confirmed). The page itself renders
+    // fine (verified via offscreen capturePage), so the failure is purely GPU
+    // compositing to the on-screen surface. Disabling hardware acceleration
+    // forces software compositing, which paints reliably everywhere — across
+    // X11, XWayland, Intel/AMD/NVIDIA. This UI is lightweight (static panels +
+    // CSS blur), so the CPU cost is negligible. Correctness for every machine
+    // beats marginal GPU smoothness on the ones where it already worked.
+    // Allow power users to opt back into GPU with CINESORT_ENABLE_GPU=1.
+    if (process.env.CINESORT_ENABLE_GPU !== "1") {
+        app.disableHardwareAcceleration();
+        app.commandLine.appendSwitch("disable-gpu-compositing");
+    }
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
 let pyProc = null;
 let mainWindow = null;
-const PORT = 47299;
+// Preferred port, but resolved to an actually-free port at launch (see
+// findFreePort). Hardcoding it meant a leftover/orphaned instance holding 47299
+// (e.g. a not-fully-closed window or a stranded Python child) made every future
+// launch fail with "address already in use" → the app appeared to "not launch".
+let PORT = 47299;
+
+/**
+ * Resolve a free TCP port on 127.0.0.1. Tries the preferred port first; if it's
+ * taken, asks the OS for an ephemeral free port (listen on 0). Guarantees a
+ * fresh launch never collides with a stale instance.
+ */
+function findFreePort(preferred) {
+    const tryListen = (p) => new Promise((resolve, reject) => {
+        const srv = net.createServer();
+        srv.once("error", reject);
+        srv.listen(p, "127.0.0.1", () => {
+            const got = srv.address().port;
+            srv.close(() => resolve(got));
+        });
+    });
+    return tryListen(preferred).catch(() => tryListen(0));
+}
+
+// ── Native file/folder picker (desktop builds only) ───────────────────────────
+// The renderer invokes this through the contextBridge `pickPaths()` API. It
+// returns the chosen absolute paths (or [] when cancelled) and the renderer
+// feeds them straight to the Python /api/scan-batch endpoint.
+//
+// Why this matters: /api/browse is intentionally restricted to mounted volumes
+// (/mnt, /media) so the Docker server can't be walked over the network. The
+// native OS picker bypasses that HTML browser entirely for deb/AppImage, letting
+// desktop users reach $HOME and any mount/share while the OS file permissions —
+// not an app-level allow-list — remain the security boundary. Docker (no
+// Electron) never sees this handler and keeps using the restricted HTML browser.
+//
+// `properties` is clamped to a known-safe whitelist so a compromised renderer
+// can only ever open a user-driven picker, never change its semantics.
+const ALLOWED_PICKER_PROPS = new Set([
+    "openFile", "openDirectory", "multiSelections", "showHiddenFiles", "createDirectory",
+]);
+ipcMain.handle("dialog:open", async (_evt, opts = {}) => {
+    const requested = Array.isArray(opts.properties) ? opts.properties : [];
+    let properties = requested.filter(p => ALLOWED_PICKER_PROPS.has(p));
+    if (properties.length === 0) {
+        // Sensible default: multi-select folders, hidden files visible.
+        properties = ["openDirectory", "multiSelections", "showHiddenFiles"];
+    }
+    const options = { properties };
+    const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options);
+    return result.canceled ? [] : result.filePaths;
+});
+
+// Reveal a file/folder in the OS file manager (desktop builds only). The
+// renderer already knows the path (it scanned it), so this exposes no new
+// information; it only asks the OS to open its file manager at that location.
+ipcMain.handle("shell:showItem", (_evt, fullPath) => {
+    if (typeof fullPath !== "string" || !fullPath) return false;
+    shell.showItemInFolder(fullPath);
+    return true;
+});
+// ─────────────────────────────────────────────────────────────────────────────
 
 function getIconPath() {
     // Try multiple locations for the icon (order: packaged app → dev fallbacks)
@@ -369,13 +447,61 @@ function installDesktopEntry() {
     // only covers FUSE mode, so prefer the env var.
     const isAppImage = !!process.env.APPIMAGE || process.resourcesPath.includes("/.mount_") || process.resourcesPath.includes("/tmp/appimage_extracted");
     if (!isAppImage) return;
-    const appImagePath = process.env.APPIMAGE || process.execPath;
+
+    const homeDir = os.homedir();
+    const appsDir = path.join(homeDir, ".local", "share", "applications");
+    const desktopFile = path.join(appsDir, "cinesort.desktop");
+
+    // ── Don't shadow a system (deb/rpm) install ──────────────────────────────
+    // A user-local .desktop in ~/.local/share/applications takes PRIORITY over
+    // /usr/share/applications. If the deb is installed and we also register our
+    // own entry, ours overrides the deb's — and if this AppImage is later moved
+    // or deleted, the menu launcher runs a dead path (spinner, no window). So
+    // when a system install is present we step aside, and we clean up any stale
+    // entry a previous AppImage run may have left behind.
+    const systemInstalled = fs.existsSync("/usr/share/applications/cinesort.desktop")
+                         || fs.existsSync("/opt/CineSort/cinesort");
+    if (systemInstalled) {
+        try {
+            if (fs.existsSync(desktopFile)) {
+                fs.unlinkSync(desktopFile);
+                try { execFileSync("update-desktop-database", [appsDir]); } catch {}
+                console.log("[main] Removed stale AppImage desktop entry (system install present).");
+            }
+        } catch (e) {
+            console.warn("[main] Could not remove stale desktop entry:", e.message);
+        }
+        console.log("[main] System (deb) install detected — skipping AppImage self-registration to avoid shadowing it.");
+        return;
+    }
 
     try {
-        const homeDir = os.homedir();
-        const appsDir = path.join(homeDir, ".local", "share", "applications");
         const iconsDir = path.join(homeDir, ".local", "share", "icons", "hicolor", "512x512", "apps");
-        const desktopFile = path.join(appsDir, "cinesort.desktop");
+
+        // ── Stable launcher path ─────────────────────────────────────────────
+        // Point Exec at a copy in ~/.local/bin instead of wherever the AppImage
+        // was double-clicked from, so moving/deleting the original file doesn't
+        // break the menu entry (a common "won't launch" cause).
+        const runningPath = process.env.APPIMAGE || process.execPath;
+        const binDir = path.join(homeDir, ".local", "bin");
+        const stablePath = path.join(binDir, "CineSort.AppImage");
+        let appImagePath = runningPath;
+        try {
+            if (runningPath !== stablePath) {
+                fs.mkdirSync(binDir, { recursive: true });
+                const cur = fs.statSync(runningPath);
+                const have = fs.existsSync(stablePath) ? fs.statSync(stablePath) : null;
+                if (!have || have.size !== cur.size) {
+                    fs.copyFileSync(runningPath, stablePath);
+                    fs.chmodSync(stablePath, 0o755);
+                    console.log(`[main] Staged AppImage to stable path: ${stablePath}`);
+                }
+                appImagePath = stablePath;
+            }
+        } catch (e) {
+            console.warn("[main] Could not stage AppImage to ~/.local/bin; using original path:", e.message);
+            appImagePath = runningPath;
+        }
 
         // Find icon: search multiple locations to cover FUSE mount and extract-and-run
         const iconCandidates = [
@@ -438,6 +564,11 @@ app.whenReady().then(async () => {
 
     // Self-install desktop entry + icon on first launch (AppImage only)
     installDesktopEntry();
+
+    // Resolve a free port BEFORE starting Python so a stale instance holding
+    // 47299 can never block this launch.
+    PORT = await findFreePort(47299);
+    console.log(`[main] Using port ${PORT}`);
 
     // Resolve Python — repairs broken venv symlinks or builds a user venv as
     // needed.  Must complete before startPython() is called.

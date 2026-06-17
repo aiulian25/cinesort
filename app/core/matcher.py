@@ -108,7 +108,18 @@ def year_match(file_year: Optional[int], meta_year: Optional[int]) -> float:
     return -0.5
 
 
-def cascade_score(
+# Human-readable labels for each metric, used by the breakdown view.
+METRIC_LABELS = {
+    "sxe": "Season/Episode",
+    "abs": "Absolute number",
+    "name": "Name similarity",
+    "seq": "Word sequence",
+    "sub": "Substring",
+    "year": "Year",
+}
+
+
+def _score_components(
     file_name: str,
     file_season: Optional[int],
     file_episode: Optional[int],
@@ -119,11 +130,12 @@ def cascade_score(
     meta_episode: int = 0,
     meta_absolute: int = 0,
     meta_year: Optional[int] = None,
-) -> float:
-    """Cascading similarity score — ported from FileBot's EpisodeMetrics cascade.
-    Combines multiple metrics with weights, returns 0.0–1.0 overall confidence."""
+) -> list[tuple[str, float, float]]:
+    """Compute the individual (metric, value, weight) tuples that make up a
+    cascade score. Shared by cascade_score() and cascade_breakdown() so the
+    aggregate and the explanation can never drift apart."""
 
-    scores = []
+    scores: list[tuple[str, float, float]] = []
 
     # 1. Season/Episode match (highest weight)
     se = season_episode_match(file_season, file_episode, meta_season, meta_episode)
@@ -152,13 +164,68 @@ def cascade_score(
     if ym != 0:
         scores.append(("year", ym, 1.0))
 
+    return scores
+
+
+def _aggregate(scores: list[tuple[str, float, float]]) -> float:
+    """Weighted average of metric components, clamped to 0.0–1.0."""
     if not scores:
         return 0.0
-
-    # Weighted average
     total_weight = sum(w for _, _, w in scores)
     weighted_sum = sum(s * w for _, s, w in scores)
     return max(0.0, min(1.0, weighted_sum / total_weight))
+
+
+def cascade_score(
+    file_name: str,
+    file_season: Optional[int],
+    file_episode: Optional[int],
+    file_absolute: Optional[int],
+    file_year: Optional[int],
+    meta_name: str,
+    meta_season: int = 0,
+    meta_episode: int = 0,
+    meta_absolute: int = 0,
+    meta_year: Optional[int] = None,
+) -> float:
+    """Cascading similarity score — ported from FileBot's EpisodeMetrics cascade.
+    Combines multiple metrics with weights, returns 0.0–1.0 overall confidence."""
+    return _aggregate(_score_components(
+        file_name, file_season, file_episode, file_absolute, file_year,
+        meta_name, meta_season, meta_episode, meta_absolute, meta_year,
+    ))
+
+
+def cascade_breakdown(
+    file_name: str,
+    file_season: Optional[int],
+    file_episode: Optional[int],
+    file_absolute: Optional[int],
+    file_year: Optional[int],
+    meta_name: str,
+    meta_season: int = 0,
+    meta_episode: int = 0,
+    meta_absolute: int = 0,
+    meta_year: Optional[int] = None,
+) -> dict:
+    """Same computation as cascade_score(), but also returns the per-metric
+    contributions so the UI can explain *why* a match was chosen."""
+    scores = _score_components(
+        file_name, file_season, file_episode, file_absolute, file_year,
+        meta_name, meta_season, meta_episode, meta_absolute, meta_year,
+    )
+    return {
+        "score": round(_aggregate(scores), 3),
+        "components": [
+            {
+                "metric": name,
+                "label": METRIC_LABELS.get(name, name),
+                "value": round(value, 3),
+                "weight": weight,
+            }
+            for (name, value, weight) in scores
+        ],
+    }
 
 
 def find_best_match(

@@ -30,7 +30,7 @@ from app.core.detector import (
     detect, MediaType, is_video_file, is_subtitle_file,
     VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, extract_subtitle_lang_tag,
 )
-from app.core.matcher import cascade_score, name_similarity
+from app.core.matcher import cascade_score, cascade_breakdown, name_similarity
 from app.core.formatter import apply_template, build_new_path, TEMPLATES, sanitize_filename
 from app.core.renamer import execute_rename, RenameAction, RenameResult
 from app.core.history import history, HistoryEntry
@@ -47,11 +47,27 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.2.0")
+app = FastAPI(title="CineSort", version="1.2.5")
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that forces the browser to revalidate every asset.
+
+    Without this, after a `docker build`/upgrade the browser keeps serving the
+    previously-cached app.js / style.css, so users run stale code (e.g. an old
+    Browse dialog) and think the new build "didn't change anything". `no-cache`
+    still allows efficient 304s via ETag/Last-Modified — it just forbids using a
+    cached copy without checking with the server first.
+    """
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
 
 # Serve static files
 STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.mount("/static", NoCacheStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # API clients (shared instances)
 # TMDbClient will read TMDB_API_KEY from environment if set, otherwise uses default
@@ -62,7 +78,11 @@ omdb = OMDbClient()   # reads OMDB_API_KEY env var; disabled (returns []) if not
 
 @app.get("/")
 async def index():
-    return FileResponse(str(STATIC_DIR / "index.html"))
+    # no-cache so the HTML (which references the asset URLs) is always revalidated.
+    return FileResponse(
+        str(STATIC_DIR / "index.html"),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/CineSort.png")
@@ -235,35 +255,95 @@ async def scan_batch(req: BatchScanRequest):
 
 # ─── Browse Endpoint ───────────────────────────────────────────────────
 
+def browse_roots() -> list[Path]:
+    """Directories the server-side HTML file browser is allowed to expose.
+
+    Default (Docker / server): mounted volumes only — /mnt and /media — so a
+    network-exposed instance can never be walked outside its mounts.
+
+    Admins can extend the list via the CINESORT_BROWSE_ROOTS environment
+    variable (os.pathsep-separated, e.g. "/srv/media:/data/tv"). This is a
+    deployment-layer setting controlled by whoever runs the container/host,
+    never by the end user, so it does not weaken the security boundary.
+
+    Note: desktop builds (deb/AppImage) use the native OS picker instead of this
+    browser, so they reach $HOME and any mount through OS permissions without
+    needing this allow-list widened.
+    """
+    roots = [Path("/mnt"), Path("/media")]
+    extra = os.environ.get("CINESORT_BROWSE_ROOTS", "")
+    for part in extra.split(os.pathsep):
+        part = part.strip()
+        if part:
+            roots.append(Path(part))
+    # De-duplicate while preserving order
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for r in roots:
+        key = str(r)
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique
+
+
+def _within_roots(p: Path, roots: list[Path]) -> bool:
+    """True if p is one of the roots or sits inside one of them."""
+    return any(p == root or root in p.parents for root in roots)
+
+
+@app.get("/api/browse-roots")
+async def get_browse_roots():
+    """Return the browsable roots (quick-access shortcuts) and the default
+    starting path for the HTML browser, plus the set of media extensions so the
+    front-end can offer a 'media only' filter. Keeps the UI from hardcoding
+    paths the backend would reject."""
+    roots = browse_roots()
+    shortcuts = [
+        {"name": r.name or str(r), "path": str(r)}
+        for r in roots if r.exists()
+    ]
+    default_path = shortcuts[0]["path"] if shortcuts else str(roots[0])
+    return {
+        "default_path": default_path,
+        "shortcuts": shortcuts,
+        "media_extensions": sorted(VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS),
+    }
+
+
 @app.get("/api/browse")
-async def browse_directory(path: str = Query("/mnt")):
+async def browse_directory(path: str = Query("")):
     """Browse directories on the server. Returns list of subdirectories and files."""
     try:
-        p = Path(path).resolve()
-        
-        # Security: only allow browsing within /mnt and /media
-        allowed_roots = [Path("/mnt"), Path("/media")]
-        if not any(p == root or root in p.parents for root in allowed_roots):
-            # If path not under allowed roots, default to /mnt
-            p = Path("/mnt")
-        
+        roots = browse_roots()
+        default_root = next((r for r in roots if r.exists()), roots[0])
+
+        # resolve() also collapses symlinks, so a symlink pointing outside the
+        # allowed roots resolves to its real target and is rejected below.
+        p = Path(path).resolve() if path else default_root
+
+        # Security: only allow browsing within the configured roots
+        if not _within_roots(p, roots):
+            p = default_root
+
         if not p.exists():
             raise HTTPException(status_code=404, detail=f"Path does not exist: {path}")
-        
+
         if not p.is_dir():
             raise HTTPException(status_code=400, detail=f"Path is not a directory: {path}")
-        
+
         items = []
-        
-        # Add parent directory link (if not at root)
-        if str(p) not in ["/mnt", "/media", "/"]:
+
+        # Add parent directory link — unless p is itself a root (don't escape upward)
+        is_root = any(p == r for r in roots)
+        if not is_root and _within_roots(p.parent, roots):
             items.append({
                 "name": "..",
                 "path": str(p.parent),
                 "type": "parent",
                 "size": None,
             })
-        
+
         # List directories and files
         try:
             for item in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
@@ -358,6 +438,94 @@ async def search_metadata(
     return {"results": results}
 
 
+# ─── Matching helpers ──────────────────────────────────────────────────
+
+# Matches at or below this confidence are flagged "needs review" and are NOT
+# auto-selected for renaming by the front-end, so a weak guess can never rename
+# a file unless the user opts in. Kept here (backend) so every build target —
+# Docker, deb, AppImage — shares one threshold.
+LOW_CONFIDENCE_THRESHOLD = 0.4
+
+
+def _query_variants(name: str, year: Optional[int]) -> list[tuple[str, Optional[int]]]:
+    """Progressively-trimmed search queries, most specific first.
+
+    Detection sometimes leaves release-group noise or stray tokens in the
+    cleaned name, so a single exact query can miss. We try the full name (with
+    year), then without the year, then drop trailing tokens one at a time.
+    """
+    name = (name or "").strip()
+    variants: list[tuple[str, Optional[int]]] = []
+    seen: set[tuple[str, Optional[int]]] = set()
+
+    def add(q: str, y: Optional[int]) -> None:
+        q = q.strip()
+        key = (q.lower(), y)
+        if q and key not in seen:
+            seen.add(key)
+            variants.append((q, y))
+
+    if year:
+        add(name, year)
+    add(name, None)
+
+    tokens = name.split()
+    for cut in range(len(tokens) - 1, 0, -1):
+        add(" ".join(tokens[:cut]), None)
+
+    return variants
+
+
+async def _cascade_search(search_coro, query: str, year: Optional[int]):
+    """Return the first non-empty result set across the trimmed query variants.
+
+    `search_coro(q, y)` is an async callable returning a list. A failure on one
+    variant (network blip, source error) is swallowed so the next variant can
+    still succeed and one flaky source never aborts the whole match."""
+    for q, y in _query_variants(query, year):
+        try:
+            results = await search_coro(q, y)
+        except Exception as exc:   # pragma: no cover - defensive
+            print(f"[WARN] search failed for {q!r}: {exc}")
+            results = []
+        if results:
+            return results
+    return []
+
+
+def _disambiguate_by_year(shows: list, year: Optional[int]) -> list:
+    """If several same-named shows come back but the filename carries a year,
+    prefer the single candidate whose year matches — avoids a needless prompt.
+    Falls back to the full list when 0 or >1 candidates match."""
+    if not year or len(shows) <= 1:
+        return shows
+    matches = [s for s in shows if getattr(s, "year", None) == year]
+    return matches if len(matches) == 1 else shows
+
+
+def _index_episodes(episodes_data: list[dict]) -> tuple[dict, dict]:
+    """Assign absolute episode numbers (cumulative across seasons, skipping
+    season-0 specials) and build fast lookup indexes:
+      (season, episode) -> episode dict
+      absolute          -> episode dict
+    This makes exact matches O(1) and lets absolute (anime) matching actually
+    fire — previously no absolute number was ever populated."""
+    regular = sorted(
+        (e for e in episodes_data if e.get("season")),   # season truthy → not 0/None
+        key=lambda e: (e.get("season") or 0, e.get("episode") or 0),
+    )
+    for i, ep in enumerate(regular, start=1):
+        ep["absolute"] = i
+
+    se_index = {
+        (e.get("season"), e.get("episode")): e
+        for e in episodes_data
+        if e.get("season") is not None and e.get("episode") is not None
+    }
+    abs_index = {e["absolute"]: e for e in regular}
+    return se_index, abs_index
+
+
 # ─── Match Endpoint ────────────────────────────────────────────────────
 
 @app.post("/api/match")
@@ -422,9 +590,14 @@ async def match_files(req: MatchRequest):
                         except Exception:
                             continue
             else:
-                # Search and check for multiple matches
+                # Search (with progressively-trimmed fallback queries) and check
+                # for multiple matches.
                 if req.datasource == "tvmaze":
-                    shows = await tvmaze.search_shows(group_name)
+                    # TVmaze search has no year filter, so we only vary the query.
+                    shows = await _cascade_search(
+                        lambda q, _y: tvmaze.search_shows(q), group_name, None
+                    )
+                    shows = _disambiguate_by_year(shows, year)
                     if len(shows) > 1:
                         # Multiple matches - ask user to select
                         return {
@@ -444,7 +617,10 @@ async def match_files(req: MatchRequest):
                             for e in eps
                         ]
                 else:
-                    shows = await tmdb.search_tv(group_name, year)
+                    shows = await _cascade_search(
+                        lambda q, y: tmdb.search_tv(q, y), group_name, year
+                    )
+                    shows = _disambiguate_by_year(shows, year)
                     if len(shows) > 1:
                         # Multiple matches - ask user to select
                         return {
@@ -472,28 +648,57 @@ async def match_files(req: MatchRequest):
                             except Exception:
                                 continue
 
-            # Match each file to an episode
+            # Match each file to an episode.
+            # Build O(1) lookup indexes once per show and assign absolute numbers
+            # so exact SxxExx / absolute matches don't need a full scan+score.
             template = req.template or TEMPLATES["series"]
+            se_index, abs_index = _index_episodes(episodes_data)
             for f in group_files:
                 best_ep = None
                 best_score = 0
-                for ep in episodes_data:
-                    score = cascade_score(
-                        file_name=f["clean_name"],
-                        file_season=f.get("season"),
-                        file_episode=f.get("episode"),
-                        file_absolute=f.get("absolute"),
-                        file_year=f.get("year"),
-                        meta_name=show_data["name"] if show_data else "",
-                        meta_season=ep["season"],
-                        meta_episode=ep["episode"],
-                        meta_year=show_data.get("year") if show_data else None,
-                    )
-                    if score > best_score:
-                        best_score = score
-                        best_ep = ep
+                fs, fe = f.get("season"), f.get("episode")
+                fabs = f.get("absolute")
+
+                if fs is not None and fe is not None and (fs, fe) in se_index:
+                    # Exact season/episode hit — no need to score every episode.
+                    best_ep = se_index[(fs, fe)]
+                    best_score = 1.0
+                elif fabs is not None and fabs in abs_index:
+                    # Absolute (anime) hit.
+                    best_ep = abs_index[fabs]
+                    best_score = 0.9
+                else:
+                    for ep in episodes_data:
+                        score = cascade_score(
+                            file_name=f["clean_name"],
+                            file_season=fs,
+                            file_episode=fe,
+                            file_absolute=fabs,
+                            file_year=f.get("year"),
+                            meta_name=show_data["name"] if show_data else "",
+                            meta_season=ep["season"],
+                            meta_episode=ep["episode"],
+                            meta_absolute=ep.get("absolute", 0) or 0,
+                            meta_year=show_data.get("year") if show_data else None,
+                        )
+                        if score > best_score:
+                            best_score = score
+                            best_ep = ep
 
                 if best_ep and show_data:
+                    # Per-metric breakdown so the UI can explain the match.
+                    score_detail = cascade_breakdown(
+                        file_name=f["clean_name"],
+                        file_season=fs,
+                        file_episode=fe,
+                        file_absolute=fabs,
+                        file_year=f.get("year"),
+                        meta_name=show_data["name"],
+                        meta_season=best_ep["season"],
+                        meta_episode=best_ep["episode"],
+                        meta_absolute=best_ep.get("absolute", 0) or 0,
+                        meta_year=show_data.get("year"),
+                    )["components"]
                     bindings = {
                         "n": show_data["name"],
                         "y": show_data.get("year", ""),
@@ -516,6 +721,7 @@ async def match_files(req: MatchRequest):
                         "new_name": new_path.name,
                         "preview": str(new_path.relative_to(new_path.parents[2]) if len(new_path.parents) > 2 else new_path.name),
                         "score": round(best_score, 3),
+                        "score_detail": score_detail,
                         "matched": True,
                         "metadata": {
                             "show": show_data.get("name"),
@@ -538,13 +744,17 @@ async def match_files(req: MatchRequest):
                     })
 
         elif media_type == "movie":
-            # ── Gather candidates from requested source + smart fallbacks ──────
+            # ── Gather candidates from every configured source, then rank ──────
+            # Rather than source-priority (TMDB unless empty), we merge TMDB and
+            # OMDb results and let cascade_score pick the best across both. This
+            # helps obscure / foreign / adult titles one source may miss. Each
+            # source uses the trimmed-query fallback so a noisy name still hits.
             movie_candidates: list = []  # list of dicts with unified shape
 
-            if req.datasource in ("tmdb", "omdb"):
-                # Always try TMDB first (richer metadata, poster)
-                tmdb_results = await tmdb.search_movie(
-                    group_name, year, include_adult=req.include_adult
+            if tmdb.enabled:
+                tmdb_results = await _cascade_search(
+                    lambda q, y: tmdb.search_movie(q, y, include_adult=req.include_adult),
+                    group_name, year,
                 )
                 for r in tmdb_results:
                     movie_candidates.append({
@@ -556,21 +766,32 @@ async def match_files(req: MatchRequest):
                         "source": "tmdb",
                     })
 
-                # ── OMDb fallback: if TMDB returned nothing (adult / niche / obscure)
-                # or OMDb was explicitly requested, add OMDb results too.
-                if (not tmdb_results or req.datasource == "omdb") and omdb.enabled:
-                    omdb_results = await omdb.search_movie(group_name, year)
-                    for r in omdb_results:
-                        movie_candidates.append({
-                            "title": r.title,
-                            "original_title": r.title,   # OMDb doesn't split original_title
-                            "year": r.year,
-                            "poster": r.poster_url,
-                            "id": r.imdb_id,
-                            "source": "omdb",
-                        })
+            if omdb.enabled:
+                omdb_results = await _cascade_search(
+                    lambda q, y: omdb.search_movie(q, y), group_name, year,
+                )
+                for r in omdb_results:
+                    movie_candidates.append({
+                        "title": r.title,
+                        "original_title": r.title,   # OMDb doesn't split original_title
+                        "year": r.year,
+                        "poster": r.poster_url,
+                        "id": r.imdb_id,
+                        "source": "omdb",
+                    })
+                print(f"[DEBUG] OMDb returned {len(omdb_results)} result(s) for '{group_name}'")
 
-                    print(f"[DEBUG] OMDb returned {len(omdb_results)} result(s) for '{group_name}'")
+            # De-duplicate candidates that appear in both sources (same title+year);
+            # keep the first (TMDB, which carries richer metadata + poster).
+            deduped: list = []
+            seen_keys: set = set()
+            for c in movie_candidates:
+                key = ((c.get("title") or "").strip().lower(), c.get("year"))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                deduped.append(c)
+            movie_candidates = deduped
 
             print(f"[DEBUG] Total movie candidates for '{group_name}': {len(movie_candidates)}")
 
@@ -607,6 +828,16 @@ async def match_files(req: MatchRequest):
                         best_movie = candidate
 
                 if best_movie:
+                    # Per-metric breakdown for the chosen candidate (item 7).
+                    score_detail = cascade_breakdown(
+                        file_name=f["clean_name"],
+                        file_season=None,
+                        file_episode=None,
+                        file_absolute=None,
+                        file_year=f.get("year"),
+                        meta_name=best_movie["title"],
+                        meta_year=best_movie.get("year"),
+                    )["components"]
                     bindings = {
                         "n": best_movie["title"],
                         "y": best_movie.get("year") or "",
@@ -625,6 +856,7 @@ async def match_files(req: MatchRequest):
                         "new_name": new_path.name,
                         "preview": new_path.name,
                         "score": round(min(best_score, 1.0), 3),
+                        "score_detail": score_detail,
                         "matched": True,
                         "metadata": {
                             "title": best_movie["title"],
@@ -801,6 +1033,51 @@ async def rename_files(req: RenameRequest):
 @app.get("/api/templates")
 async def get_templates():
     return TEMPLATES
+
+
+class PreviewRequest(BaseModel):
+    """A naming template plus a sample file's detected fields, for live preview."""
+    template: str
+    sample: dict = {}
+
+    @field_validator("template")
+    @classmethod
+    def validate_template(cls, v: str) -> str:
+        if len(v) > 500:
+            raise ValueError("Template too long.")
+        return v
+
+
+@app.post("/api/preview-template")
+async def preview_template(req: PreviewRequest):
+    """Format a template against a sample file using the SAME apply_template the
+    real rename uses — so the preview can never drift from the actual output.
+    Missing fields fall back to readable placeholders."""
+    s = req.sample or {}
+
+    def pick(key, default):
+        val = s.get(key)
+        return default if val in (None, "") else val
+
+    bindings = {
+        "n": pick("clean_name", "Show Name"),
+        "y": pick("year", 2024),
+        "s": s.get("season") if s.get("season") is not None else 1,
+        "e": s.get("episode") if s.get("episode") is not None else 1,
+        "e_end": s.get("episode_end"),
+        "t": pick("title", "Episode Title"),
+        "absolute": s.get("absolute") if s.get("absolute") is not None else 1,
+        "d": pick("date", "2024-01-01"),
+        "source": pick("source", "WEB-DL"),
+        "vf": pick("video_format", "1080p"),
+        "group": pick("group", "GROUP"),
+        "id": pick("id", 0),
+    }
+    try:
+        preview = apply_template(req.template, bindings)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid template: {exc}")
+    return {"preview": preview}
 
 
 @app.get("/api/actions")

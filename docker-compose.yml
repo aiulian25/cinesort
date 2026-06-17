@@ -22,6 +22,11 @@ services:
       # Server configuration (usually no need to change these)
       - CINESORT_HOST=0.0.0.0
       - CINESORT_PORT=8888
+
+      # Optional: extra folders the in-app file browser may expose, in addition
+      # to /mnt and /media (os.pathsep / ":"-separated). Only add paths you also
+      # mount as volumes below. Used as quick-access "Shortcuts" in the browser.
+      # - CINESORT_BROWSE_ROOTS=/media/movies:/media/tv:/media/downloads
     
     volumes:
       # Persistent data (history, config)

@@ -1,7 +1,14 @@
-const { contextBridge, webUtils } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
     isElectron: true,
+    // Open the native OS file/folder picker (main process owns the dialog).
+    // Resolves to an array of absolute paths, or [] if the user cancelled.
+    // `opts.properties` is a subset of Electron's dialog properties; the main
+    // process clamps it to a safe whitelist.
+    pickPaths: (opts) => ipcRenderer.invoke("dialog:open", opts),
+    // Reveal a path in the OS file manager. Resolves to true if handled.
+    showInFolder: (fullPath) => ipcRenderer.invoke("shell:showItem", fullPath),
     // webUtils.getPathForFile() is the Electron 32+ supported way to resolve
     // the real filesystem path from a File object dropped into the renderer.
     // We guard against failures so a broken sandbox or missing API never

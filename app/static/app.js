@@ -11,9 +11,26 @@ let scannedFiles = [];   // raw from /api/scan
 let matchResults = [];   // raw from /api/match
 let selectedSet = new Set(); // indices in scannedFiles that are checked
 const isElectron = !!(window.electronAPI && window.electronAPI.isElectron);
+const canShowInFolder = isElectron && typeof window.electronAPI.showInFolder === "function";
 let draggedIdx = null;   // index being dragged
 let draggedFrom = null;  // 'left' or 'right'
 let focusedIdx = null;   // keyboard-focused row (DEL/arrow navigation)
+
+// Matches at/below this confidence are flagged "needs review" and are NOT
+// auto-selected for renaming — the user must opt in. Mirrors the backend's
+// LOW_CONFIDENCE_THRESHOLD so all build targets behave identically.
+const LOW_CONFIDENCE = 0.4;
+
+/* Deselect weak auto-matches so a low-confidence guess can't be renamed by
+   default. Manual names and confident matches keep their selection. */
+function applyConfidenceGate() {
+    for (let i = 0; i < matchResults.length; i++) {
+        const m = matchResults[i];
+        if (m && m.matched && !m.manual && m.score < LOW_CONFIDENCE) {
+            selectedSet.delete(i);
+        }
+    }
+}
 
 /* ─── DOM refs ────────────────────────────────────────────── */
 const $ = s => document.querySelector(s);
@@ -283,44 +300,122 @@ function showSelectionDialog(groupName, candidates, filesToMatch) {
     
     html += `</div>`;
     html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px">
-        <button class="glass-btn" onclick="modalOverlay.classList.add('hidden')" style="flex:1">Cancel</button>
+        <button class="glass-btn" onclick="R.closeModal()" style="flex:1">Cancel</button>
     </div>`;
     
     modalBody.innerHTML = html;
     modalOverlay.classList.remove("hidden");
-    
+
     // Store filesToMatch for the selection callback
     window._pendingMatchFiles = filesToMatch;
 }
 
-function showConflictsDialog(conflicts) {
-    modalTitle.textContent = "⚠️ Rename Conflicts Detected";
-    
-    let html = `<p style="color:var(--txt2);margin-bottom:12px;font-size:12px">${conflicts.length} conflict(s) found. Review before renaming:</p>`;
-    html += `<div style="max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:8px">`;
-    
-    for (const c of conflicts) {
-        if (c.type === "duplicate_destination") {
-            html += `<div style="padding:10px;background:rgba(255,180,0,0.1);border:1px solid rgba(255,180,0,0.3);border-radius:6px">`;
-            html += `<div style="font-weight:500;font-size:11px;color:#ffb400;margin-bottom:4px">⚠ Duplicate Destination</div>`;
-            html += `<div style="font-size:10px;color:var(--txt2);margin-bottom:4px">${esc(c.message)}</div>`;
-            html += `<div style="font-size:10px;color:var(--txt3)">${c.files.map(f => `<div>• ${esc(Path.basename(f))}</div>`).join('')}</div>`;
-            html += `</div>`;
-        } else if (c.type === "file_exists") {
-            html += `<div style="padding:10px;background:rgba(255,60,60,0.1);border:1px solid rgba(255,60,60,0.3);border-radius:6px">`;
-            html += `<div style="font-weight:500;font-size:11px;color:#ff4444;margin-bottom:4px">⛔ File Exists</div>`;
-            html += `<div style="font-size:10px;color:var(--txt2)">${esc(c.message)}</div>`;
-            html += `<div style="font-size:10px;color:var(--txt3);margin-top:4px">Source: ${esc(Path.basename(c.file))}</div>`;
-            html += `</div>`;
+/* ─── Themed confirm dialog (replaces native confirm() for theme consistency) ──
+   Uses its own overlay so it can stack above an already-open modal (e.g. the
+   History modal). Returns a Promise<boolean>. */
+function confirmDialog(message, { okText = "OK", cancelText = "Cancel", danger = false } = {}) {
+    return new Promise(resolve => {
+        let overlay = $id("confirm-overlay");
+        if (!overlay) {
+            overlay = document.createElement("div");
+            overlay.id = "confirm-overlay";
+            overlay.className = "confirm-overlay hidden";
+            document.body.appendChild(overlay);
         }
+        overlay.innerHTML = `
+            <div class="glass-panel confirm-box">
+                <p class="confirm-msg"></p>
+                <div class="confirm-actions">
+                    <button class="glass-btn" id="confirm-cancel">${esc(cancelText)}</button>
+                    <button class="glass-btn ${danger ? "btn-danger" : "btn-scan"}" id="confirm-ok">${esc(okText)}</button>
+                </div>
+            </div>`;
+        overlay.querySelector(".confirm-msg").textContent = message;   // textContent = no HTML injection
+        overlay.classList.remove("hidden");
+
+        const finish = (val) => {
+            overlay.classList.add("hidden");
+            document.removeEventListener("keydown", onKey, true);
+            resolve(val);
+        };
+        const onKey = (e) => {
+            // Capture phase + stopPropagation so Enter/Esc don't leak to the
+            // document-level shortcuts (which would close the modal behind us).
+            if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+            else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); finish(true); }
+        };
+        $id("confirm-ok").addEventListener("click", () => finish(true));
+        $id("confirm-cancel").addEventListener("click", () => finish(false));
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) finish(false); });
+        document.addEventListener("keydown", onKey, true);
+        $id("confirm-ok").focus();
+    });
+}
+
+// Active conflicts being resolved in the dialog. Each conflict gets a
+// normalised `_origs` array (the source file(s) involved) so the inline
+// Skip / Rename-to-(2) buttons can reference them by index.
+let _activeConflicts = [];
+
+function _findIdxByOriginal(origPath) {
+    return scannedFiles.findIndex(f => f && f.path === origPath);
+}
+
+function _bumpFilename(name) {
+    const dot = name.lastIndexOf(".");
+    return dot > 0 ? name.slice(0, dot) + " (2)" + name.slice(dot) : name + " (2)";
+}
+
+function showConflictsDialog(conflicts) {
+    _activeConflicts = conflicts.map(c => ({
+        ...c,
+        _origs: c.type === "duplicate_destination" ? (c.files || []) : (c.file ? [c.file] : []),
+    }));
+    renderConflictsDialog();
+}
+
+function renderConflictsDialog() {
+    modalTitle.textContent = "⚠️ Rename Conflicts";
+
+    if (_activeConflicts.length === 0) {
+        modalBody.innerHTML = `<div style="text-align:center;padding:24px;color:var(--green);font-size:13px">✓ All conflicts resolved</div>
+            <button class="glass-btn btn-scan" onclick="R.closeModal()" style="width:100%;margin-top:8px">Done</button>`;
+        return;
     }
-    
+
+    let html = `<p style="color:var(--txt2);margin-bottom:12px;font-size:12px">${_activeConflicts.length} conflict(s) remaining. Resolve each below:</p>`;
+    html += `<div style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px">`;
+
+    _activeConflicts.forEach((c, ci) => {
+        const isDup = c.type === "duplicate_destination";
+        const accent = isDup ? "255,180,0" : "255,60,60";
+        const icon = isDup ? "⚠ Duplicate Destination" : "⛔ File Exists";
+        html += `<div style="padding:10px;background:rgba(${accent},0.1);border:1px solid rgba(${accent},0.3);border-radius:6px">`;
+        html += `<div style="font-weight:500;font-size:11px;color:rgb(${accent});margin-bottom:4px">${icon}</div>`;
+        html += `<div style="font-size:10px;color:var(--txt2);margin-bottom:6px">${esc(c.message)}</div>`;
+        // One action row per involved source file
+        c._origs.forEach((orig, j) => {
+            const idx = _findIdxByOriginal(orig);
+            const known = idx >= 0;
+            html += `<div style="display:flex;align-items:center;gap:6px;margin-top:4px">`;
+            html += `<span style="flex:1;font-size:10px;color:var(--txt3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(Path.basename(orig))}</span>`;
+            if (known) {
+                html += `<button class="glass-btn" style="font-size:10px;padding:3px 8px" onclick="R.conflictBump(${ci},${j})">Rename → (2)</button>`;
+                html += `<button class="glass-btn" style="font-size:10px;padding:3px 8px" onclick="R.conflictSkip(${ci},${j})">Skip</button>`;
+            } else {
+                html += `<span style="font-size:10px;color:var(--txt3)">(not in list)</span>`;
+            }
+            html += `</div>`;
+        });
+        html += `</div>`;
+    });
+
     html += `</div>`;
     html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">`;
-    html += `<p style="font-size:10px;color:var(--txt3);margin-bottom:8px">Tip: Adjust matches manually by dragging rows, or skip conflicting files before renaming.</p>`;
-    html += `<button class="glass-btn" onclick="modalOverlay.classList.add('hidden')" style="width:100%">Got it</button>`;
+    html += `<p style="font-size:10px;color:var(--txt3);margin-bottom:8px">Skip removes the file from the rename selection. Rename → (2) appends " (2)" to the new name.</p>`;
+    html += `<button class="glass-btn" onclick="R.closeModal()" style="width:100%">Close</button>`;
     html += `</div>`;
-    
+
     modalBody.innerHTML = html;
     modalOverlay.classList.remove("hidden");
 }
@@ -419,223 +514,405 @@ function updateActionHint() {
 
 elAction.addEventListener("change", () => {
     updateActionHint();
+    persistPrefs();
     // Refresh the right pane so the preview reflects the new action mode
     if (matchResults.some(r => r && r.matched)) renderRight();
 });
-updateActionHint(); // run once on load
+elSource.addEventListener("change", persistPrefs);
+
+/* ─── Last-used preferences (shared localStorage, all build targets) ──────
+   localStorage is per-origin and persists across sessions identically in the
+   Electron renderer and a Docker browser tab, so one implementation covers all
+   targets with no file-permission or config-path differences. */
+const PREFS_KEY = "cinesort.prefs.v1";
+const VALID_THEMES = ["dark", "light", "aurora"];
+
+function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") || "dark";
+}
+function applyTheme(name) {
+    const t = VALID_THEMES.includes(name) ? name : "dark";
+    document.documentElement.setAttribute("data-theme", t);
+    // Reflect the choice in the Settings picker if it's open.
+    document.querySelectorAll(".theme-swatch").forEach(b =>
+        b.classList.toggle("active", b.dataset.theme === t));
+    persistPrefs();
+}
+
+function persistPrefs() {
+    try {
+        localStorage.setItem(PREFS_KEY, JSON.stringify({
+            datasource: elSource.value,
+            action: elAction.value,
+            template: elTemplate.value,
+            scanPath: elScanPath.value,
+            theme: currentTheme(),
+        }));
+    } catch { /* storage disabled — non-fatal */ }
+}
+function restorePrefs() {
+    let p;
+    try { p = JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"); }
+    catch { p = {}; }
+    if (!p || typeof p !== "object") p = {};
+    // Only apply values that are still valid options (guards against stale data).
+    if (p.datasource && [...elSource.options].some(o => o.value === p.datasource)) elSource.value = p.datasource;
+    if (p.action && [...elAction.options].some(o => o.value === p.action)) elAction.value = p.action;
+    if (typeof p.template === "string" && p.template) elTemplate.value = p.template;
+    if (typeof p.scanPath === "string" && p.scanPath) elScanPath.value = p.scanPath;
+    applyTheme(p.theme || "dark");
+}
+restorePrefs();
+
+updateActionHint(); // run once on load (after prefs restore so it reflects the saved action)
 
 
 elScanPath.addEventListener("keydown", e => { if (e.key === "Enter") doScan(); });
 
 /* ─── Browse ──────────────────────────────────────────────── */
-btnBrowse.addEventListener("click", () => showBrowseDialog("/mnt"));
+// Desktop builds (deb/AppImage) use the native OS picker, which reaches $HOME
+// and any mount/share. Docker and plain-browser builds fall back to the
+// server-side HTML browser, which stays restricted to mounted volumes.
+btnBrowse.addEventListener("click", () => {
+    if (isElectron && typeof window.electronAPI.pickPaths === "function") {
+        showNativePicker();
+    } else {
+        // No arg → showBrowseDialog resolves the default root from /api/browse-roots
+        // (first existing mounted volume, e.g. /media). Avoids landing on a
+        // non-existent /mnt in Docker, which looked like "nothing to select".
+        showBrowseDialog();
+    }
+});
+
+/* Shared: scan a list of file/folder paths and load them into the panes. */
+async function scanPaths(paths) {
+    status(`Scanning ${paths.length} item(s)…`);
+    try {
+        const data = await api("/api/scan-batch", {
+            method: "POST",
+            body: JSON.stringify({ paths }),
+        });
+        scannedFiles = data.files;
+        matchResults = [];
+        selectedSet = new Set(scannedFiles.map((_, i) => i));
+        renderLeft();
+        renderRight();
+        renderGutter();
+        btnMatch.disabled = scannedFiles.length === 0;
+        btnRename.disabled = true;
+        updateTemplatePreview();   // preview now has a real sample file
+        statusDone(`Found ${scannedFiles.length} media file(s)`);
+    } catch (err) {
+        statusDone("Scan failed: " + err.message);
+    }
+}
+
+/* Native picker chooser (Electron only). On Linux a single GTK dialog can be
+   either a file or a folder selector, not both, so we offer the choice. */
+function showNativePicker() {
+    modalTitle.textContent = "Add Media";
+    modalBody.innerHTML = `
+        <p style="color:var(--txt2);font-size:12px;margin-bottom:16px;line-height:1.6">
+            Pick folders or files anywhere on this computer — your home folder,
+            mounted drives, or network shares. You can also drag &amp; drop them
+            onto the window.
+        </p>
+        <div style="display:flex;gap:10px">
+            <button class="glass-btn btn-scan" id="pick-folders" style="flex:1;padding:16px;font-size:13px">
+                📁 Choose Folder(s)
+            </button>
+            <button class="glass-btn" id="pick-files" style="flex:1;padding:16px;font-size:13px">
+                📄 Choose File(s)
+            </button>
+        </div>`;
+    modalOverlay.classList.remove("hidden");
+    $id("pick-folders").addEventListener("click", () => nativePick("folders"));
+    $id("pick-files").addEventListener("click", () => nativePick("files"));
+}
+
+async function nativePick(mode) {
+    const properties = mode === "folders"
+        ? ["openDirectory", "multiSelections", "showHiddenFiles", "createDirectory"]
+        : ["openFile", "multiSelections", "showHiddenFiles"];
+
+    let paths = [];
+    try {
+        paths = await window.electronAPI.pickPaths({ properties });
+    } catch (err) {
+        modalOverlay.classList.add("hidden");
+        statusDone("Picker failed: " + err.message);
+        return;
+    }
+
+    modalOverlay.classList.add("hidden");
+    if (!paths || paths.length === 0) return;   // cancelled
+    await scanPaths(paths);
+}
+
+// Cached /api/browse-roots payload (shortcuts + default path + media exts).
+let _browseRootsCache = null;
+async function getBrowseRoots() {
+    if (_browseRootsCache) return _browseRootsCache;
+    try {
+        _browseRootsCache = await api("/api/browse-roots");
+    } catch {
+        // Fallback to the historical defaults if the endpoint is unavailable.
+        _browseRootsCache = {
+            default_path: "/mnt",
+            shortcuts: [{ name: "mnt", path: "/mnt" }, { name: "media", path: "/media" }],
+            media_extensions: [],
+        };
+    }
+    return _browseRootsCache;
+}
 
 async function showBrowseDialog(startPath) {
-    modalTitle.textContent = "Browse Server Folders";
-    let selectedPaths = new Set();
+    modalTitle.textContent = "Browse Folders";
+
+    const rootsInfo = await getBrowseRoots();
+    const shortcuts = rootsInfo.shortcuts || [];
+    const mediaExts = new Set(rootsInfo.media_extensions || []);
+    if (!startPath) startPath = rootsInfo.default_path || "/mnt";
+
+    // State persists across navigation (selection is no longer cleared on cd).
+    const selectedPaths = new Set();
     let currentItems = [];
-    
+    let currentPath  = startPath;
+    let mediaOnly    = false;
+    let filterText   = "";
+    let kbIndex      = -1;   // keyboard-focused index into the *visible* list
+
+    function isMediaName(name) {
+        const dot = name.lastIndexOf(".");
+        if (dot < 0) return false;
+        return mediaExts.has(name.slice(dot).toLowerCase());
+    }
+
+    function visibleItems() {
+        const ft = filterText.trim().toLowerCase();
+        return currentItems.filter(item => {
+            if (item.type === "parent") return true;
+            if (ft && !item.name.toLowerCase().includes(ft)) return false;
+            if (mediaOnly && item.type === "file" && !isMediaName(item.name)) return false;
+            return true;
+        });
+    }
+
     async function loadPath(path) {
         try {
             const data = await api(`/api/browse?path=${encodeURIComponent(path)}`);
             currentItems = data.items;
-            selectedPaths.clear(); // Clear selection when navigating
-            renderBrowser(data.path, data.items);
+            currentPath  = data.path;
+            filterText   = "";
+            kbIndex      = -1;
+            renderAll();
         } catch (err) {
-            renderBrowser(path, [], err.message);
+            currentItems = [];
+            currentPath  = path;
+            renderAll(err.message);
         }
     }
-    
-    function renderBrowser(currentPath, items, error = null) {
-        let html = `
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:8px;background:var(--glass-bg);border:1px solid var(--border);border-radius:8px">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                </svg>
-                <code style="flex:1;font-size:11px;color:var(--txt2);font-family:var(--font-mono);user-select:all">${esc(currentPath)}</code>
-            </div>`;
-        
+
+    /* ── Full chrome (sidebar, path bar, crumbs, toolbar, list shell, actions) ── */
+    function renderAll(error = null) {
+        // Sidebar shortcuts
+        let side = `<div class="browse-side"><div class="browse-side-title">Shortcuts</div>`;
+        for (const sc of shortcuts) {
+            const active = (currentPath === sc.path) ? " active" : "";
+            side += `<button class="browse-shortcut${active}" data-path="${esc(sc.path)}" title="${esc(sc.path)}">📂 ${esc(sc.name || sc.path)}</button>`;
+        }
+        side += `</div>`;
+
+        // Breadcrumb (clickable segments)
+        const parts = currentPath.split("/").filter(Boolean);
+        let crumbs = `<button class="crumb" data-path="/">/</button>`;
+        let acc = "";
+        for (const part of parts) {
+            acc += "/" + part;
+            crumbs += `<span class="crumb-sep">›</span><button class="crumb" data-path="${esc(acc)}">${esc(part)}</button>`;
+        }
+
+        let main = `<div class="browse-main">`;
+        main += `<div class="browse-pathrow">
+            <input type="text" id="browse-path-input" class="glass-input mono" spellcheck="false"
+                   value="${esc(currentPath)}" placeholder="/path/to/folder">
+            <button class="glass-btn" id="browse-go">Go</button>
+        </div>`;
+        main += `<div class="browse-crumbs">${crumbs}</div>`;
+        main += `<div class="browse-toolbar">
+            <input type="text" id="browse-filter" class="glass-input" spellcheck="false"
+                   placeholder="Filter this folder…" value="${esc(filterText)}">
+            <label class="cb-label"><input type="checkbox" id="browse-mediaonly" ${mediaOnly ? "checked" : ""}><span>Media only</span></label>
+        </div>`;
         if (error) {
-            html += `<p style="color:var(--red);font-size:11px;padding:8px;background:rgba(255,80,80,0.1);border-radius:6px;margin-bottom:12px">${esc(error)}</p>`;
+            main += `<p class="browse-error">${esc(error)}</p>`;
         }
-        
-        html += `<div id="browser-list" tabindex="0" style="max-height:400px;overflow-y:auto;margin-bottom:12px;border:1px solid var(--border);border-radius:8px;outline:none">`;
-        
-        if (items.length === 0 && !error) {
-            html += `<div style="padding:20px;text-align:center;color:var(--txt3);font-size:11px">Empty directory</div>`;
-        }
-        
-        for (let i = 0; i < items.length; i++) {
-            const item = items[i];
-            const icon = item.type === "parent" ? "↩️" :
-                        item.type === "directory" ? "📁" : "📄";
-            const size = item.size !== null ? fmt(item.size) : "";
-            const isDir = item.type === "directory" || item.type === "parent";
-            const isParent = item.type === "parent";
-            const classes = isDir ? "browser-item browser-dir" : "browser-item";
-            const checked = selectedPaths.has(item.path) ? "checked" : "";
-            
-            // Don't show checkbox for parent directory
-            const checkbox = isParent ? "" : `<input type="checkbox" ${checked} data-idx="${i}" style="margin-right:4px;cursor:pointer">`;
-            
-            html += `<div class="${classes}" data-path="${esc(item.path)}" data-idx="${i}" data-is-dir="${isDir}" data-is-parent="${isParent}">
-                ${checkbox}
-                <span style="font-size:16px;margin-right:8px">${icon}</span>
-                <span style="flex:1;font-size:11px;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.name)}</span>
-                ${size ? `<span style="font-size:10px;color:var(--txt3);margin-left:8px">${size}</span>` : ""}
-            </div>`;
-        }
-        
-        html += `</div>`;
-        
-        const selectedCount = selectedPaths.size;
-        const selectText = selectedCount > 0 ? `Scan ${selectedCount} Selected` : "Scan Current Folder";
-        
-        html += `<div style="display:flex;gap:8px;margin-bottom:8px">
-            <button class="glass-btn" id="browse-select-all" style="flex:1;font-size:11px">Select All</button>
-            <button class="glass-btn" id="browse-deselect-all" style="flex:1;font-size:11px">Deselect All</button>
+        main += `<div id="browser-list" tabindex="0" class="browse-list" role="listbox" aria-multiselectable="true" aria-label="Folder contents"></div>`;
+        main += `<div class="browse-tray" id="browse-tray"></div>`;
+        main += `<div class="browse-actions">
+            <button class="glass-btn" id="browse-select-visible">Select Visible</button>
+            <button class="glass-btn" id="browse-cancel">Cancel</button>
+            <button class="glass-btn btn-scan" id="browse-scan">Scan</button>
         </div>`;
-        html += `<div style="display:flex;gap:8px">
-            <button class="glass-btn" onclick="modalOverlay.classList.add('hidden')" style="flex:1">Cancel</button>
-            <button class="glass-btn btn-scan" id="browse-select" style="flex:2">${selectText}</button>
-        </div>`;
-        
-        modalBody.innerHTML = html;
-        
-        const browserList = $id("browser-list");
-        
-        // Add keyboard handler for Ctrl+A
-        browserList.addEventListener("keydown", (e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+        main += `</div>`;
+
+        modalBody.innerHTML = `<div class="browse-wrap">${side}${main}</div>`;
+
+        // Wire chrome-level handlers (these elements survive across list re-renders)
+        modalBody.querySelectorAll(".browse-shortcut").forEach(b =>
+            b.addEventListener("click", () => loadPath(b.dataset.path)));
+        modalBody.querySelectorAll(".crumb").forEach(b =>
+            b.addEventListener("click", () => loadPath(b.dataset.path)));
+
+        const pathInput = $id("browse-path-input");
+        const go = () => { const v = pathInput.value.trim(); if (v) loadPath(v); };
+        $id("browse-go").addEventListener("click", go);
+        pathInput.addEventListener("keydown", e => {
+            e.stopPropagation();
+            if (e.key === "Enter") { e.preventDefault(); go(); }
+        });
+
+        const filterInput = $id("browse-filter");
+        filterInput.addEventListener("input", () => { filterText = filterInput.value; kbIndex = -1; renderList(); });
+        filterInput.addEventListener("keydown", e => e.stopPropagation());
+
+        $id("browse-mediaonly").addEventListener("change", e => { mediaOnly = e.target.checked; kbIndex = -1; renderList(); });
+
+        $id("browse-select-visible").addEventListener("click", () => {
+            for (const item of visibleItems()) {
+                if (item.type !== "parent") selectedPaths.add(item.path);
+            }
+            renderList();
+        });
+        $id("browse-cancel").addEventListener("click", () => modalOverlay.classList.add("hidden"));
+        $id("browse-scan").addEventListener("click", doScanSelection);
+
+        // Keyboard navigation — attached once per chrome render (the list element
+        // persists across cheap renderList() calls, so wiring it there would
+        // stack duplicate handlers).
+        $id("browser-list").addEventListener("keydown", e => {
+            // Stop browser-list keys from reaching the document-level shortcuts
+            // (Delete/Ctrl+A/F2) so they can't act on the panes behind the modal.
+            // Escape is intentionally left to bubble so it still closes the modal.
+            if (e.key !== "Escape") e.stopPropagation();
+            const vis = visibleItems();
+            if (e.key === "ArrowDown") { e.preventDefault(); kbIndex = Math.min(kbIndex + 1, vis.length - 1); renderList(); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); kbIndex = Math.max(kbIndex - 1, 0); renderList(); }
+            else if (e.key === "Backspace") {
                 e.preventDefault();
-                selectAll();
+                const parent = vis.find(it => it.type === "parent");
+                if (parent) loadPath(parent.path);
+            }
+            else if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+                e.preventDefault();
+                for (const it of vis) if (it.type !== "parent") selectedPaths.add(it.path);
+                renderList();
+            }
+            else if (kbIndex >= 0 && kbIndex < vis.length) {
+                const it = vis[kbIndex];
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (it.type === "directory" || it.type === "parent") loadPath(it.path);
+                    else doScanSelection();
+                } else if (e.key === " ") {
+                    e.preventDefault();
+                    if (it.type !== "parent") {
+                        if (selectedPaths.has(it.path)) selectedPaths.delete(it.path); else selectedPaths.add(it.path);
+                        renderList();
+                    }
+                }
             }
         });
-        
-        // Focus the list for keyboard shortcuts
-        setTimeout(() => browserList.focus(), 50);
-        
-        // Add checkbox change handlers
-        const checkboxes = modalBody.querySelectorAll('input[type="checkbox"]');
-        for (const cb of checkboxes) {
-            cb.addEventListener("change", (e) => {
-                e.stopPropagation();
-                const idx = parseInt(cb.getAttribute("data-idx"));
-                const item = items[idx];
-                if (cb.checked) {
-                    selectedPaths.add(item.path);
-                } else {
-                    selectedPaths.delete(item.path);
-                }
-                updateSelectButton();
-            });
-        }
-        
-        // Add click handlers for navigation
-        const browserItems = modalBody.querySelectorAll(".browser-item");
-        for (const itemEl of browserItems) {
-            itemEl.addEventListener("click", (e) => {
-                // If clicking checkbox, let it handle itself
-                if (e.target.tagName === "INPUT") return;
-                
-                const path = itemEl.getAttribute("data-path");
-                const isDir = itemEl.getAttribute("data-is-dir") === "true";
-                const isParent = itemEl.getAttribute("data-is-parent") === "true";
-                const idx = itemEl.getAttribute("data-idx");
-                
-                // Parent directory: navigate up
-                if (isParent) {
-                    loadPath(path);
-                    return;
-                }
-                
-                // Directory: toggle checkbox or navigate on double-click
-                if (isDir) {
-                    const checkbox = itemEl.querySelector('input[type="checkbox"]');
-                    if (checkbox) {
-                        checkbox.checked = !checkbox.checked;
-                        checkbox.dispatchEvent(new Event("change"));
-                    }
-                }
-            });
-            
-            // Double-click on directory to navigate into it
-            itemEl.addEventListener("dblclick", (e) => {
-                const path = itemEl.getAttribute("data-path");
-                const isDir = itemEl.getAttribute("data-is-dir") === "true";
-                const isParent = itemEl.getAttribute("data-is-parent") === "true";
-                
-                if ((isDir || isParent) && !e.target.matches('input[type="checkbox"]')) {
-                    loadPath(path);
-                }
-            });
-        }
-        
-        function selectAll() {
-            selectedPaths.clear();
-            items.forEach(item => {
-                if (item.type !== "parent") {
-                    selectedPaths.add(item.path);
-                }
-            });
-            renderBrowser(currentPath, items, error);
-        }
-        
-        function deselectAll() {
-            selectedPaths.clear();
-            renderBrowser(currentPath, items, error);
-        }
-        
-        function updateSelectButton() {
-            const selectBtn = $id("browse-select");
-            if (selectBtn) {
-                const selectedCount = selectedPaths.size;
-                selectBtn.textContent = selectedCount > 0 ? `Scan ${selectedCount} Selected` : "Scan Current Folder";
+
+        renderList();
+    }
+
+    /* ── Just the list + selection tray (cheap re-render on filter/select) ── */
+    function renderList() {
+        const items = visibleItems();
+        const listEl = $id("browser-list");
+        if (!listEl) return;
+
+        if (items.length === 0) {
+            listEl.innerHTML = `<div class="browse-empty">Nothing to show here</div>`;
+        } else {
+            let html = "";
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                const isParent = item.type === "parent";
+                const isDir = item.type === "directory" || isParent;
+                const icon = isParent ? "↩️" : isDir ? "📁" : "📄";
+                const size = item.size != null ? fmt(item.size) : "";
+                const checked = selectedPaths.has(item.path) ? "checked" : "";
+                const kb = (i === kbIndex) ? " kb-focus" : "";
+                const checkbox = isParent ? "" : `<input type="checkbox" ${checked} data-idx="${i}" aria-label="Select ${esc(item.name)}">`;
+                const ariaSel = isParent ? "" : ` role="option" aria-selected="${selectedPaths.has(item.path)}"`;
+                html += `<div class="browser-item${isDir ? " browser-dir" : ""}${kb}"${ariaSel} data-path="${esc(item.path)}" data-idx="${i}" data-is-dir="${isDir}" data-is-parent="${isParent}">
+                    ${checkbox}
+                    <span class="bi-icon">${icon}</span>
+                    <span class="bi-name">${esc(item.name)}</span>
+                    ${size ? `<span class="bi-size">${size}</span>` : ""}
+                </div>`;
             }
+            listEl.innerHTML = html;
         }
-        
-        // Add button handlers
-        const selectAllBtn = $id("browse-select-all");
-        const deselectAllBtn = $id("browse-deselect-all");
-        if (selectAllBtn) selectAllBtn.addEventListener("click", selectAll);
-        if (deselectAllBtn) deselectAllBtn.addEventListener("click", deselectAll);
-        
-        // Add select button handler
-        const selectBtn = $id("browse-select");
-        if (selectBtn) {
-            selectBtn.addEventListener("click", async () => {
-                modalOverlay.classList.add("hidden");
-                
-                // If items are selected, scan all of them
-                if (selectedPaths.size > 0) {
-                    const paths = Array.from(selectedPaths);
-                    status(`Scanning ${paths.length} selected item(s)…`);
-                    try {
-                        const data = await api("/api/scan-batch", {
-                            method: "POST",
-                            body: JSON.stringify({ paths }),
-                        });
-                        scannedFiles = data.files;
-                        matchResults = [];
-                        selectedSet = new Set(scannedFiles.map((_, i) => i));
-                        renderLeft();
-                        renderRight();
-                        renderGutter();
-                        btnMatch.disabled = scannedFiles.length === 0;
-                        btnRename.disabled = true;
-                        statusDone(`Found ${scannedFiles.length} media file(s) from ${paths.length} selected item(s)`);
-                    } catch (err) {
-                        statusDone("Scan failed: " + err.message);
-                    }
-                } else {
-                    // No items selected, scan current folder
-                    elScanPath.value = currentPath;
-                    doScan();
-                }
+
+        // Checkbox toggles
+        listEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener("change", e => {
+                e.stopPropagation();
+                const item = items[parseInt(cb.dataset.idx)];
+                if (cb.checked) selectedPaths.add(item.path); else selectedPaths.delete(item.path);
+                updateTray();
             });
+        });
+
+        // Row click (toggle dir checkbox) / double-click (navigate)
+        listEl.querySelectorAll(".browser-item").forEach(el => {
+            el.addEventListener("click", e => {
+                if (e.target.tagName === "INPUT") return;
+                if (el.dataset.isParent === "true") { loadPath(el.dataset.path); return; }
+                const cb = el.querySelector('input[type="checkbox"]');
+                if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event("change")); }
+            });
+            el.addEventListener("dblclick", e => {
+                if (e.target.matches('input[type="checkbox"]')) return;
+                if (el.dataset.isDir === "true") loadPath(el.dataset.path);
+            });
+        });
+
+        setTimeout(() => {
+            listEl.focus();
+            listEl.querySelector(".kb-focus")?.scrollIntoView({ block: "nearest" });
+        }, 0);
+
+        updateTray();
+    }
+
+    function updateTray() {
+        const tray = $id("browse-tray");
+        const scanBtn = $id("browse-scan");
+        const n = selectedPaths.size;
+        if (tray) {
+            tray.innerHTML = n > 0
+                ? `<span>${n} selected (across folders)</span> <button class="linklike" id="browse-clearsel">clear</button>`
+                : `<span class="browse-tray-empty">Nothing selected — Scan will use the current folder</span>`;
+            const clr = $id("browse-clearsel");
+            if (clr) clr.addEventListener("click", () => { selectedPaths.clear(); renderList(); });
+        }
+        if (scanBtn) scanBtn.textContent = n > 0 ? `Scan ${n} Selected` : "Scan Current Folder";
+    }
+
+    async function doScanSelection() {
+        modalOverlay.classList.add("hidden");
+        if (selectedPaths.size > 0) {
+            await scanPaths(Array.from(selectedPaths));
+        } else {
+            elScanPath.value = currentPath;
+            doScan();
         }
     }
-    
+
     modalOverlay.classList.remove("hidden");
     modalBody.innerHTML = `<div style="text-align:center;padding:40px;color:var(--txt3)">Loading...</div>`;
     await loadPath(startPath);
@@ -661,6 +938,8 @@ async function doScan() {
         renderGutter();
         btnMatch.disabled = scannedFiles.length === 0;
         btnRename.disabled = true;
+        persistPrefs();            // remember this folder for next session
+        updateTemplatePreview();   // preview now has a real sample file
         statusDone(`Found ${scannedFiles.length} media file(s)`);
     } catch (err) {
         statusDone("Scan failed: " + err.message);
@@ -678,7 +957,19 @@ async function doMatch() {
     const filesToMatch = scannedFiles.filter((_, i) => selectedSet.has(i));
     if (filesToMatch.length === 0) return;
 
-    status("Matching against " + elSource.value.toUpperCase() + "…");
+    // /api/match is a single request (kept that way to preserve cross-file
+    // grouping + subtitle pairing + conflict detection — see IMPROVEMENTS §4.5).
+    // Since we can't show determinate per-file progress without server-side
+    // streaming, surface an elapsed-time ticker so a long lookup never looks
+    // frozen behind the indeterminate bar.
+    const src = elSource.value.toUpperCase();
+    const t0 = Date.now();
+    status(`Matching ${filesToMatch.length} file(s) against ${src}…`);
+    const ticker = setInterval(() => {
+        // Update only the text so the indeterminate bar's animation isn't reset.
+        const secs = Math.round((Date.now() - t0) / 1000);
+        statusText.textContent = `Matching ${filesToMatch.length} file(s) against ${src}… ${secs}s`;
+    }, 1000);
     btnMatch.disabled = true;
 
     try {
@@ -691,6 +982,7 @@ async function doMatch() {
                 include_adult: elIncludeAdult.checked,
             }),
         });
+        clearInterval(ticker);
 
         // Check if we need user to select from multiple shows
         if (data.needs_selection) {
@@ -709,11 +1001,13 @@ async function doMatch() {
             matchResults[i] = resultMap.get(scannedFiles[i].path) || null;
         }
 
+        applyConfidenceGate();
+        renderLeft();   // reflect any rows the gate deselected
         renderRight();
         renderGutter();
         btnRename.disabled = !matchResults.some(r => r && r.matched);
         const matched = matchResults.filter(r => r && r.matched).length;
-        
+
         // Show conflicts if any
         if (data.conflicts && data.conflicts.length > 0) {
             showConflictsDialog(data.conflicts);
@@ -724,6 +1018,7 @@ async function doMatch() {
     } catch (err) {
         statusDone("Match failed: " + err.message);
     } finally {
+        clearInterval(ticker);
         btnMatch.disabled = scannedFiles.length === 0;
     }
 }
@@ -798,7 +1093,7 @@ const btnSettings = $id("btn-settings");
 btnSettings.addEventListener("click", showSettings);
 
 async function showSettings() {
-    modalTitle.textContent = "API Key Settings";
+    modalTitle.textContent = "Settings";
     modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:var(--txt3)">Loading…</div>`;
     modalOverlay.classList.remove("hidden");
 
@@ -818,8 +1113,24 @@ async function showSettings() {
         ? `<span class="settings-badge ok">● Active</span>`
         : `<span class="settings-badge missing">○ Not set</span>`;
 
+    const th = currentTheme();
+    const swatch = (id, label) =>
+        `<div class="theme-swatch ${th === id ? "active" : ""}" data-theme="${id}">
+            <span class="theme-dot dot-${id}"></span>${label}
+        </div>`;
+
     modalBody.innerHTML = `
-        <p style="color:var(--txt3);font-size:11px;margin-bottom:16px;line-height:1.6">
+        <div class="settings-row">
+            <div class="settings-label"><span>Appearance</span></div>
+            <p class="settings-hint">Theme is remembered on this device.</p>
+            <div class="theme-picker" id="theme-picker">
+                ${swatch("dark", "Dark")}
+                ${swatch("light", "Light")}
+                ${swatch("aurora", "Aurora")}
+            </div>
+        </div>
+
+        <p style="color:var(--txt3);font-size:11px;margin:16px 0;line-height:1.6">
             Keys are saved to <code class="settings-path">${esc(cfgFile)}</code> and take
             effect immediately — no restart needed.
             Docker users: set them as environment variables in
@@ -861,10 +1172,15 @@ async function showSettings() {
         </div>
 
         <div style="display:flex;gap:8px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
-            <button class="glass-btn" onclick="modalOverlay.classList.add('hidden')" style="flex:1">Cancel</button>
+            <button class="glass-btn" onclick="R.closeModal()" style="flex:1">Cancel</button>
             <button class="glass-btn btn-scan" id="settings-save" style="flex:2">Save &amp; Apply</button>
         </div>
         <p id="settings-msg" style="font-size:11px;margin-top:10px;min-height:16px"></p>`;
+
+    // Theme picker — applies instantly and persists.
+    modalBody.querySelectorAll(".theme-swatch").forEach(sw => {
+        sw.addEventListener("click", () => applyTheme(sw.dataset.theme));
+    });
 
     // Show/hide toggles
     modalBody.querySelectorAll(".settings-eye").forEach(btn => {
@@ -961,7 +1277,7 @@ async function showHistory() {
         html += `</div>`;
         html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px">`;
         html += `<button class="glass-btn" onclick="R.clearHistory()" style="flex:1;font-size:11px">Clear History</button>`;
-        html += `<button class="glass-btn" onclick="modalOverlay.classList.add('hidden')" style="flex:1;font-size:11px">Close</button>`;
+        html += `<button class="glass-btn" onclick="R.closeModal()" style="flex:1;font-size:11px">Close</button>`;
         html += `</div>`;
         
         modalBody.innerHTML = html;
@@ -975,6 +1291,11 @@ function renderLeft() {
     leftCount.textContent = scannedFiles.length;
 
     if (scannedFiles.length === 0) {
+        // Build-aware hint: the desktop app has a native picker reaching $HOME,
+        // while Docker users browse their mounted volumes.
+        const hint = isElectron
+            ? "or click Browse to choose a folder or files"
+            : "or enter a folder path above, or click Browse, then Scan";
         leftList.innerHTML = `
             <div class="drop-zone active" id="drop-zone">
                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.25">
@@ -983,7 +1304,7 @@ function renderLeft() {
                     <line x1="12" y1="3" x2="12" y2="15"/>
                 </svg>
                 <p>Drop media files here</p>
-                <p class="drop-hint">or enter a folder path above and click Scan</p>
+                <p class="drop-hint">${hint}</p>
             </div>`;
         return;
     }
@@ -1004,13 +1325,15 @@ function renderLeft() {
         const vfTag = f.video_format ? `<span class="tag">${f.video_format}</span>` : "";
 
         html += `<div class="row-item" data-idx="${i}" draggable="true"
+                      role="option" tabindex="-1" aria-selected="${selectedSet.has(i)}"
+                      aria-label="${esc(f.filename)}"
                       onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
                       oncontextmenu="R.showContextMenu(event, ${i}, 'left')"
                       ondragstart="R.dragStart(event, ${i}, 'left')"
                       ondragover="R.dragOver(event, ${i}, 'left')"
                       ondrop="R.drop(event, ${i}, 'left')"
                       ondragend="R.dragEnd(event)">
-            <div class="row-cb"><input type="checkbox" ${checked} data-idx="${i}"></div>
+            <div class="row-cb"><input type="checkbox" ${checked} data-idx="${i}" aria-label="Select ${esc(f.filename)}"></div>
             <div class="row-icon">${fileIcon(f.media_type)}</div>
             <span class="row-text original" title="${esc(f.path)}">${esc(f.filename)}</span>
             <div class="row-tags">${typeTag}${sxeTag}${vfTag}${sizeTag}</div>
@@ -1099,9 +1422,16 @@ function renderRight() {
                 ? (m.new_name || "")
                 : (m.preview || m.new_name || "");
 
+            // Three-tier confidence: high ≥0.6, review ≥0.4, low <0.4.
+            // Low-confidence matches are flagged "review" and were deselected
+            // by the confidence gate so they aren't renamed unless re-checked.
+            const scoreCls = m.score >= 0.6 ? "score-hi" : m.score >= LOW_CONFIDENCE ? "score-mid" : "score-lo";
+            const reviewTag = (!isManual && m.score < LOW_CONFIDENCE)
+                ? `<span class="tag score-review" title="Low confidence — review before renaming (not auto-selected)">review</span>`
+                : "";
             const scoreTag = isManual
                 ? `<span class="tag manual">manual</span>`
-                : `<span class="tag ${m.score >= 0.6 ? "score-hi" : "score-lo"}">${Math.round(m.score * 100)}%</span>`;
+                : `${reviewTag}<span class="tag ${scoreCls}">${Math.round(m.score * 100)}%</span>`;
 
             html += `<div class="row-item" data-idx="${i}" draggable="true"
                           onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
@@ -1195,10 +1525,17 @@ function showContextMenu(e, idx, pane) {
     html += `<div class="ctx-sep"></div>`;
     if (pane === "left" && f) {
         html += `<div class="ctx-item" onclick="R.copyPath('${esc(f.path)}', event)">📋 Copy path</div>`;
-        html += `<div class="ctx-item ctx-disabled">📁 Show in folder</div>`;
+        // "Show in folder" works only on desktop (Electron exposes shell). In
+        // Docker/browser there is no OS file manager to reveal into, so it stays
+        // disabled rather than silently doing nothing.
+        if (canShowInFolder) {
+            html += `<div class="ctx-item" onclick="R.showInFolder(${idx})">📁 Show in folder</div>`;
+        } else {
+            html += `<div class="ctx-item ctx-disabled" title="Available in the desktop app">📁 Show in folder</div>`;
+        }
     }
     if (pane === "right") {
-        html += `<div class="ctx-item" onclick="R.startInlineEdit(${idx});hideContextMenu()"><span>✏ Edit name manually</span><kbd>F2</kbd></div>`;
+        html += `<div class="ctx-item" onclick="R.startInlineEdit(${idx});R.hideMenu()"><span>✏ Edit name manually</span><kbd>F2</kbd></div>`;
         if (m && m.matched && !m.manual) {
             html += `<div class="ctx-item" onclick="R.showMetadata(${idx})">ℹ️ View metadata</div>`;
         }
@@ -1223,6 +1560,11 @@ function hideContextMenu() {
 
 /* ─── Sync hover between panes ────────────────────────────── */
 window.R = {
+    // Inline onclick handlers run in GLOBAL scope, where the IIFE-local
+    // `modalOverlay` / `hideContextMenu` are not visible. Routing them through
+    // the global `R` object is what makes Cancel/Close/Done buttons work.
+    closeModal() { modalOverlay.classList.add("hidden"); },
+    hideMenu() { hideContextMenu(); },
     hoverRow(idx) {
         leftList.querySelector(`.row-item[data-idx="${idx}"]`)?.classList.add("peer-hover");
         rightList.querySelector(`.row-item[data-idx="${idx}"]`)?.classList.add("peer-hover");
@@ -1236,6 +1578,51 @@ window.R = {
         removeSingleFile(idx);
     },
     focusRow,
+    showInFolder(idx) {
+        hideContextMenu();
+        const f = scannedFiles[idx];
+        if (!f || !canShowInFolder) return;
+        window.electronAPI.showInFolder(f.path);
+    },
+
+    /* Inline conflict resolution (item 7) */
+    conflictSkip(ci, j) {
+        const c = _activeConflicts[ci];
+        if (!c) return;
+        const orig = c._origs[j];
+        const idx = _findIdxByOriginal(orig);
+        if (idx >= 0) selectedSet.delete(idx);   // exclude from the rename batch
+        _activeConflicts.splice(ci, 1);
+        renderLeft();
+        renderRight();
+        renderConflictsDialog();
+        status(`Skipped ${Path.basename(orig)}`);
+        setTimeout(() => statusHide(), 1500);
+    },
+    conflictBump(ci, j) {
+        const c = _activeConflicts[ci];
+        if (!c) return;
+        const orig = c._origs[j];
+        const idx = _findIdxByOriginal(orig);
+        const m = matchResults[idx];
+        if (m && m.new_path) {
+            const oldName = m.new_name || Path.basename(m.new_path);
+            const newName = _bumpFilename(oldName);
+            const dir = m.new_path.slice(0, m.new_path.length - oldName.length);
+            m.new_path = dir + newName;
+            m.new_name = newName;
+            if (typeof m.preview === "string" && m.preview.endsWith(oldName)) {
+                m.preview = m.preview.slice(0, m.preview.length - oldName.length) + newName;
+            } else {
+                m.preview = newName;
+            }
+        }
+        _activeConflicts.splice(ci, 1);
+        renderRight();
+        renderConflictsDialog();
+        status(`Renamed to ${m && m.new_name ? m.new_name : "…(2)"}`);
+        setTimeout(() => statusHide(), 1500);
+    },
     copyPath(path, e) {
         e?.stopPropagation();
         navigator.clipboard.writeText(path).then(() => {
@@ -1282,9 +1669,33 @@ window.R = {
         html += `<code style="font-size:10px;color:var(--txt);display:block;margin-top:4px;word-break:break-all">${esc(m.new_path || "")}</code>`;
         html += `</div>`;
         
-        html += `<div style="margin-top:12px;color:var(--txt3);font-size:11px"><strong>Match score:</strong> ${Math.round(m.score * 100)}%</div>`;
+        html += `<div style="margin-top:12px;color:var(--txt3);font-size:11px"><strong>Match score:</strong> ${Math.round(m.score * 100)}%`;
+        if (m.score < LOW_CONFIDENCE) html += ` <span style="color:var(--amber)">(low — review)</span>`;
         html += `</div>`;
-        
+
+        // Why this match was chosen — per-metric breakdown (item 7).
+        if (Array.isArray(m.score_detail) && m.score_detail.length) {
+            html += `<div style="margin-top:8px"><strong style="font-size:11px;color:var(--txt3)">Why this match</strong>`;
+            html += `<table style="width:100%;margin-top:6px;font-size:11px;border-collapse:collapse">`;
+            for (const c of m.score_detail) {
+                const pct = Math.round(c.value * 100);
+                const pos = c.value >= 0;
+                const barColor = pos ? "var(--green)" : "var(--red)";
+                const barW = Math.min(100, Math.abs(pct));
+                html += `<tr>
+                    <td style="color:var(--txt2);padding:2px 8px 2px 0;white-space:nowrap">${esc(c.label || c.metric)}</td>
+                    <td style="width:100%">
+                        <div style="background:var(--glass-hover);border-radius:3px;height:8px;overflow:hidden">
+                            <div style="height:100%;width:${barW}%;background:${barColor}"></div>
+                        </div>
+                    </td>
+                    <td style="color:var(--txt3);padding:2px 0 2px 8px;text-align:right;white-space:nowrap">${pct}% ·×${c.weight}</td>
+                </tr>`;
+            }
+            html += `</table></div>`;
+        }
+        html += `</div>`;
+
         modalBody.innerHTML = html;
         modalOverlay.classList.remove("hidden");
     },
@@ -1322,7 +1733,9 @@ window.R = {
             for (let i = 0; i < scannedFiles.length; i++) {
                 matchResults[i] = resultMap.get(scannedFiles[i].path) || null;
             }
-            
+
+            applyConfidenceGate();
+            renderLeft();   // reflect any rows the gate deselected
             renderRight();
             renderGutter();
             btnRename.disabled = !matchResults.some(r => r && r.matched);
@@ -1405,8 +1818,8 @@ window.R = {
     },
     
     async undoOperation(operationId) {
-        if (!confirm("Undo this rename operation? The file will be moved back to its original location.")) return;
-        
+        if (!await confirmDialog("Undo this rename operation? The file will be moved back to its original location.", { okText: "Undo" })) return;
+
         try {
             const data = await api(`/api/undo/${operationId}`, { method: "POST" });
             status(data.message);
@@ -1422,8 +1835,8 @@ window.R = {
     },
     
     async clearHistory() {
-        if (!confirm("Clear all history? This cannot be undone.")) return;
-        
+        if (!await confirmDialog("Clear all history? This cannot be undone.", { okText: "Clear History", danger: true })) return;
+
         try {
             await api("/api/history", { method: "DELETE" });
             modalOverlay.classList.add("hidden");
@@ -1546,8 +1959,73 @@ rightList.addEventListener("scroll", () => {
 document.querySelectorAll(".preset-btn").forEach(btn => {
     btn.addEventListener("click", () => {
         elTemplate.value = btn.dataset.template;
+        persistPrefs();
+        updateTemplatePreview();
     });
 });
+
+/* ─── Template token palette (insert at cursor) ───────────────── */
+document.querySelectorAll(".token-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+        const tok = btn.dataset.token;
+        const start = elTemplate.selectionStart ?? elTemplate.value.length;
+        const end   = elTemplate.selectionEnd ?? elTemplate.value.length;
+        elTemplate.value = elTemplate.value.slice(0, start) + tok + elTemplate.value.slice(end);
+        const caret = start + tok.length;
+        elTemplate.focus();
+        elTemplate.setSelectionRange(caret, caret);
+        persistPrefs();
+        updateTemplatePreview();
+    });
+});
+
+/* ─── Bulk selection actions (operate on the left-pane checkboxes) ── */
+function bulkSelect(predicate) {
+    selectedSet = new Set();
+    for (let i = 0; i < scannedFiles.length; i++) {
+        if (predicate(matchResults[i], i)) selectedSet.add(i);
+    }
+    renderLeft();
+    renderRight();
+}
+$id("bulk-matched")?.addEventListener("click", () => bulkSelect(m => !!(m && m.matched)));
+$id("bulk-high")?.addEventListener("click", () => bulkSelect(m => !!(m && m.matched && m.score >= 0.6)));
+$id("bulk-clear-unmatched")?.addEventListener("click", () => {
+    // Deselect rows that have no match; leave matched selections untouched.
+    for (let i = 0; i < scannedFiles.length; i++) {
+        const m = matchResults[i];
+        if (!m || !m.matched) selectedSet.delete(i);
+    }
+    renderLeft();
+    renderRight();
+});
+
+/* ─── Live template preview (item 6) ──────────────────────────── */
+let _previewTimer = null;
+function updateTemplatePreview() {
+    const el = $id("template-preview");
+    if (!el) return;
+    const tpl = elTemplate.value.trim();
+    if (!tpl) { el.textContent = ""; return; }
+    // Sample = first selected file, else first scanned file, else empty.
+    const idx = scannedFiles.findIndex((_, i) => selectedSet.has(i));
+    const sample = scannedFiles[idx] || scannedFiles[0] || {};
+    clearTimeout(_previewTimer);
+    _previewTimer = setTimeout(async () => {
+        try {
+            const data = await api("/api/preview-template", {
+                method: "POST",
+                body: JSON.stringify({ template: tpl, sample }),
+            });
+            el.textContent = data.preview ? "→ " + data.preview : "";
+            el.classList.remove("preview-error");
+        } catch (err) {
+            el.textContent = "⚠ " + err.message;
+            el.classList.add("preview-error");
+        }
+    }, 250);
+}
+elTemplate.addEventListener("input", () => { persistPrefs(); updateTemplatePreview(); });
 
 /* ─── Keyboard shortcuts ──────────────────────────────────── */
 document.addEventListener("keydown", e => {
@@ -1658,5 +2136,9 @@ function fileIcon(type) {
         <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>
     </svg>`;
 }
+
+/* ─── Init ────────────────────────────────────────────────── */
+renderLeft();             // build-aware empty state (replaces the static drop-zone)
+updateTemplatePreview();  // show a preview for the restored/default template
 
 })();

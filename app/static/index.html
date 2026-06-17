@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CineSort - Media Organizer</title>
     <link rel="icon" type="image/png" href="/CineSort.png">
+    <!-- Apply saved theme before first paint to avoid a flash of the wrong theme -->
+    <script>
+        try {
+            var _p = JSON.parse(localStorage.getItem("cinesort.prefs.v1") || "{}");
+            if (_p && ["dark", "light", "aurora"].indexOf(_p.theme) !== -1)
+                document.documentElement.setAttribute("data-theme", _p.theme);
+        } catch (e) {}
+    </script>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -65,6 +73,17 @@
                             <button class="preset-btn" data-template="{n}/{n} - {absolute} - {t}" title="Anime (organise into folder)">Anime</button>
                             <button class="preset-btn" data-template="{n} - {s00e00} - {t}" title="Rename in-place (no folder creation)">Flat</button>
                         </div>
+                        <div class="template-tokens" id="template-tokens" aria-label="Insert template token">
+                            <button class="token-btn" data-token="{n}" title="Name">n</button>
+                            <button class="token-btn" data-token="{y}" title="Year">y</button>
+                            <button class="token-btn" data-token="{s00e00}" title="S00E00">s00e00</button>
+                            <button class="token-btn" data-token="{t}" title="Title">t</button>
+                            <button class="token-btn" data-token="{absolute}" title="Absolute episode #">abs</button>
+                            <button class="token-btn" data-token="{source}" title="Source (WEB-DL…)">src</button>
+                            <button class="token-btn" data-token="{vf}" title="Video format (1080p…)">vf</button>
+                            <button class="token-btn" data-token="{group}" title="Release group">grp</button>
+                        </div>
+                        <div class="template-preview" id="template-preview" title="Live preview against the first file"></div>
                     </div>
                 </div>
             </div>
@@ -100,7 +119,7 @@
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
             </svg>
             <input type="text" id="scan-path" class="scanbar-input" placeholder="Enter folder path or drag &amp; drop files here…" spellcheck="false">
-            <button id="btn-browse" class="glass-btn" title="Browse server folders">
+            <button id="btn-browse" class="glass-btn" title="Browse for a folder">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                     <circle cx="12" cy="13" r="2"/>
@@ -125,9 +144,14 @@
             <div class="pane pane-left glass-panel" id="pane-left">
                 <div class="pane-header">
                     <span class="pane-title">Original Files</span>
+                    <div class="bulk-actions" id="bulk-actions">
+                        <button class="bulk-btn" id="bulk-matched" title="Select only files that matched">Matched</button>
+                        <button class="bulk-btn" id="bulk-high" title="Select only confident matches (≥60%)">≥60%</button>
+                        <button class="bulk-btn" id="bulk-clear-unmatched" title="Deselect files with no match">Clear unmatched</button>
+                    </div>
                     <span class="pane-count" id="left-count">0</span>
                 </div>
-                <div class="pane-list" id="left-list">
+                <div class="pane-list" id="left-list" role="listbox" aria-multiselectable="true" aria-label="Original files">
                     <div class="drop-zone active" id="drop-zone">
                         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.25">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -147,9 +171,12 @@
             <div class="pane pane-right glass-panel" id="pane-right">
                 <div class="pane-header">
                     <span class="pane-title">New Names</span>
+                    <span class="score-legend" title="Match confidence">
+                        <span class="lg lg-hi">High</span><span class="lg lg-mid">Review</span><span class="lg lg-lo">Low</span>
+                    </span>
                     <span class="pane-count" id="right-count">0</span>
                 </div>
-                <div class="pane-list" id="right-list">
+                <div class="pane-list" id="right-list" role="listbox" aria-label="New names">
                     <div class="empty-right">
                         <p>Click <strong>Match</strong> to look up metadata</p>
                     </div>

@@ -20,6 +20,12 @@
     --red: #ef4444;
     --red-t: rgba(239,68,68,.15);
     --amber: #f59e0b;
+    /* Themed surfaces (overridden per data-theme) */
+    --accent2: #8b5cf6;            /* secondary accent for gradients/glow */
+    --input-bg: rgba(255,255,255,.035);
+    --menu-bg: #16162a;            /* solid bg for <select> popups / menus */
+    --scrim: rgba(0,0,0,.55);      /* modal backdrop */
+    --panel-shadow: none;          /* extra elevation (used in light theme) */
     --radius: 14px;
     --radius-sm: 8px;
     --radius-xs: 5px;
@@ -63,6 +69,7 @@ body {
     -webkit-backdrop-filter: blur(var(--blur));
     border: 1px solid var(--border);
     border-radius: var(--radius);
+    box-shadow: var(--panel-shadow);
 }
 
 /* ─── App layout ──────────────────────────────────────────────── */
@@ -104,7 +111,7 @@ body {
 
 /* ─── Glass controls ──────────────────────────────────────────── */
 .glass-select, .glass-input {
-    background: rgba(255,255,255,.035);
+    background: var(--input-bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-xs);
     color: var(--txt);
@@ -125,7 +132,18 @@ body {
     background-image: url("data:image/svg+xml,%3Csvg width='8' height='5' viewBox='0 0 8 5' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l3 3 3-3' stroke='%2363636a' stroke-width='1.3' stroke-linecap='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat; background-position: right 8px center;
 }
-.glass-select option { background: #16162a; color: var(--txt); }
+.glass-select option { background: var(--menu-bg); color: var(--txt); }
+.glass-select optgroup {
+    background: var(--menu-bg);
+    color: var(--txt3);
+    font-weight: 600;
+    font-style: normal;
+}
+.glass-select option:checked,
+.glass-select option:hover {
+    background: var(--accent);
+    color: #fff;
+}
 
 .glass-btn {
     display: inline-flex; align-items: center; gap: 5px;
@@ -294,7 +312,9 @@ label:has(#include-adult:checked) { color: #fcd34d; }
 .tag.series { color: #a5b4fc; background: rgba(99,102,241,.1); }
 .tag.movie { color: #fbbf24; background: rgba(251,191,36,.1); }
 .tag.score-hi { color: #86efac; background: rgba(34,197,94,.1); }
+.tag.score-mid { color: #fcd34d; background: rgba(245,158,11,.12); }
 .tag.score-lo { color: #fca5a5; background: rgba(239,68,68,.1); }
+.tag.score-review { color: #fbbf24; background: rgba(245,158,11,.16); text-transform: uppercase; letter-spacing: .04em; font-size: 9px; }
 .tag.sxe { color: var(--txt2); }
 
 .row-cb {
@@ -341,7 +361,7 @@ body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px rgba(99,102,241,.25)
 /* ─── Modal ───────────────────────────────────────────────────── */
 .modal-overlay {
     position: fixed; inset: 0; z-index: 200;
-    background: rgba(0,0,0,.55);
+    background: var(--scrim);
     backdrop-filter: blur(6px);
     display: flex; align-items: center; justify-content: center;
 }
@@ -629,3 +649,242 @@ body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px rgba(99,102,241,.25)
 .browser-item input[type="checkbox"]:checked {
     accent-color: var(--green);
 }
+.browser-item input[type="checkbox"] { margin-right: 6px; }
+.browser-item.kb-focus { background: var(--accent-t); box-shadow: inset 3px 0 0 var(--accent); }
+.bi-icon { font-size: 15px; margin-right: 8px; flex-shrink: 0; }
+.bi-name { flex: 1; font-size: 11px; color: var(--txt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bi-size { font-size: 10px; color: var(--txt3); margin-left: 8px; flex-shrink: 0; }
+
+/* Browser layout: sidebar shortcuts + main pane */
+.browse-wrap { display: flex; gap: 12px; }
+.browse-side {
+    flex: 0 0 116px; display: flex; flex-direction: column; gap: 4px;
+    border-right: 1px solid var(--border); padding-right: 10px;
+}
+.browse-side-title {
+    font-size: 9px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--txt3); padding: 2px 4px 4px;
+}
+.browse-shortcut {
+    display: block; width: 100%; text-align: left;
+    padding: 6px 8px; border: none; border-radius: var(--radius-xs);
+    background: transparent; color: var(--txt2); font-size: 11px;
+    cursor: pointer; transition: background .12s var(--ease);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.browse-shortcut:hover { background: var(--glass-hover); color: var(--txt); }
+.browse-shortcut.active { background: var(--accent-t); color: var(--txt); }
+.browse-main { flex: 1; min-width: 0; }
+
+.browse-pathrow { display: flex; gap: 6px; margin-bottom: 8px; }
+.browse-pathrow .glass-input { flex: 1; font-size: 11px; }
+.browse-pathrow .glass-btn { font-size: 11px; }
+
+.browse-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 8px; }
+.crumb {
+    border: none; background: transparent; color: var(--txt2);
+    font-size: 11px; padding: 1px 4px; border-radius: 3px; cursor: pointer;
+}
+.crumb:hover { background: var(--glass-hover); color: var(--txt); }
+.crumb-sep { color: var(--txt3); font-size: 11px; }
+
+.browse-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.browse-toolbar .glass-input { flex: 1; font-size: 11px; }
+
+.browse-list {
+    max-height: 360px; overflow-y: auto; margin-bottom: 8px;
+    border: 1px solid var(--border); border-radius: 8px; outline: none;
+}
+.browse-empty { padding: 20px; text-align: center; color: var(--txt3); font-size: 11px; }
+.browse-error {
+    color: var(--red); font-size: 11px; padding: 8px;
+    background: var(--red-t); border-radius: 6px; margin-bottom: 8px;
+}
+
+.browse-tray { font-size: 10px; color: var(--txt2); margin-bottom: 8px; min-height: 14px; }
+.browse-tray-empty { color: var(--txt3); }
+.linklike {
+    border: none; background: transparent; color: var(--accent);
+    font-size: 10px; cursor: pointer; padding: 0; text-decoration: underline;
+}
+.browse-actions { display: flex; gap: 8px; }
+.browse-actions .glass-btn:nth-child(1),
+.browse-actions .glass-btn:nth-child(2) { flex: 1; font-size: 11px; }
+.browse-actions .glass-btn:nth-child(3) { flex: 2; }
+
+/* ─── §4 UI polish: tokens, preview, bulk actions, legend, a11y ──────────── */
+
+/* Template token palette + live preview */
+.template-tokens { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 5px; }
+.token-btn {
+    font-family: var(--mono); font-size: 9px; line-height: 1;
+    padding: 3px 5px; border: 1px solid var(--border); border-radius: var(--radius-xs);
+    background: var(--glass-hover); color: var(--txt2); cursor: pointer;
+    transition: all .12s var(--ease);
+}
+.token-btn:hover { background: var(--glass-active); color: var(--txt); border-color: var(--border-hi); }
+.template-preview {
+    margin-top: 5px; font-family: var(--mono); font-size: 10px; line-height: 1.4;
+    color: var(--txt3); word-break: break-all; max-height: 32px; overflow: hidden;
+}
+.template-preview.preview-error { color: var(--red); }
+
+/* Bulk selection actions in the left pane header */
+.bulk-actions { display: flex; gap: 4px; margin-left: auto; margin-right: 8px; }
+.bulk-btn {
+    font-size: 10px; padding: 3px 8px; border: 1px solid var(--border);
+    border-radius: var(--radius-xs); background: var(--glass-hover);
+    color: var(--txt2); cursor: pointer; transition: all .12s var(--ease); white-space: nowrap;
+}
+.bulk-btn:hover { background: var(--glass-active); color: var(--txt); border-color: var(--border-hi); }
+
+/* Confidence legend in the right pane header */
+.score-legend { display: flex; gap: 6px; margin-left: auto; margin-right: 8px; align-items: center; }
+.score-legend .lg { font-size: 9px; padding: 1px 6px; border-radius: 999px; }
+.score-legend .lg-hi { color: #86efac; background: rgba(34,197,94,.1); }
+.score-legend .lg-mid { color: #fcd34d; background: rgba(245,158,11,.12); }
+.score-legend .lg-lo { color: #fca5a5; background: rgba(239,68,68,.1); }
+
+/* Accessibility: visible focus ring for keyboard users on interactive controls */
+.glass-btn:focus-visible, .glass-input:focus-visible, .glass-select:focus-visible,
+.token-btn:focus-visible, .bulk-btn:focus-visible, .preset-btn:focus-visible,
+.browse-shortcut:focus-visible, .crumb:focus-visible,
+input[type="checkbox"]:focus-visible,
+.browse-list:focus-visible, .pane-list:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* ─── Themed confirm dialog (stacks above the main modal) ────────────────── */
+.confirm-overlay {
+    position: fixed; inset: 0; z-index: 400;
+    background: var(--scrim);
+    backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+}
+.confirm-overlay.hidden { display: none; }
+.confirm-box {
+    width: 92%; max-width: 380px;
+    padding: 18px;
+    display: flex; flex-direction: column; gap: 16px;
+}
+.confirm-msg { font-size: 13px; color: var(--txt); line-height: 1.5; }
+.confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.confirm-actions .glass-btn { min-width: 88px; justify-content: center; }
+.btn-danger { background: var(--red-t); border-color: rgba(239,68,68,.3); color: #fca5a5; }
+.btn-danger:hover { background: rgba(239,68,68,.28); box-shadow: 0 0 16px var(--red-t); }
+
+/* ════════════════════════════════════════════════════════════════
+   THEMES — switch via <html data-theme="...">. Default (no attr) = dark.
+   ════════════════════════════════════════════════════════════════ */
+
+/* ─────────── LIGHT ─────────── */
+:root[data-theme="light"] {
+    --bg: #eef1f8;
+    --glass: rgba(255,255,255,.66);
+    --glass-hover: rgba(15,23,42,.05);
+    --glass-active: rgba(15,23,42,.09);
+    --border: rgba(15,23,42,.12);
+    --border-hi: rgba(15,23,42,.22);
+    --txt: #1b2030;
+    --txt2: #515a70;
+    --txt3: #8a93a8;
+    --accent: #5145e8;
+    --accent-t: rgba(81,69,232,.12);
+    --accent2: #7c3aed;
+    --input-bg: rgba(255,255,255,.9);
+    --menu-bg: #ffffff;
+    --scrim: rgba(20,24,40,.32);
+    --panel-shadow: 0 8px 30px rgba(20,24,40,.08);
+}
+/* subtle, soft blobs on a light canvas */
+:root[data-theme="light"] .blob { opacity: .08; filter: blur(130px); }
+/* Readable accent/status text on light translucent chips & buttons */
+:root[data-theme="light"] .btn-scan,
+:root[data-theme="light"] .btn-match,
+:root[data-theme="light"] .tag.series,
+:root[data-theme="light"] .meta-ep { color: #4f46e5; }
+:root[data-theme="light"] .btn-rename,
+:root[data-theme="light"] .tag.score-hi,
+:root[data-theme="light"] .score-legend .lg-hi,
+:root[data-theme="light"] .action-hint.action-hint-rename { color: #15803d; }
+:root[data-theme="light"] .tag.movie,
+:root[data-theme="light"] .tag.score-mid,
+:root[data-theme="light"] .tag.score-review,
+:root[data-theme="light"] .tag.manual,
+:root[data-theme="light"] .score-legend .lg-mid,
+:root[data-theme="light"] .key-banner,
+:root[data-theme="light"] .action-hint.action-hint-move,
+:root[data-theme="light"] .action-hint.action-hint-copy { color: #b45309; }
+:root[data-theme="light"] .tag.score-lo,
+:root[data-theme="light"] .score-legend .lg-lo,
+:root[data-theme="light"] .action-hint.action-hint-hardlink,
+:root[data-theme="light"] .action-hint.action-hint-symlink { color: #b91c1c; }
+:root[data-theme="light"] .action-hint.action-hint-test { color: #0369a1; }
+
+/* ─────────── AURORA (neon glass — the "stand out" theme) ─────────── */
+:root[data-theme="aurora"] {
+    --bg: #070313;
+    --glass: rgba(130,90,255,.06);
+    --glass-hover: rgba(150,110,255,.12);
+    --glass-active: rgba(150,110,255,.18);
+    --border: rgba(168,130,255,.18);
+    --border-hi: rgba(190,150,255,.40);
+    --txt: #ece9ff;
+    --txt2: #aa9fd9;
+    --txt3: #6c6499;
+    --accent: #b14bff;
+    --accent-t: rgba(177,75,255,.22);
+    --accent2: #22d3ee;
+    --input-bg: rgba(130,90,255,.07);
+    --menu-bg: #150a2e;
+    --scrim: rgba(8,2,24,.62);
+    --blur: 26px;
+}
+/* aurora glow — brighter, saturated blobs */
+:root[data-theme="aurora"] .blob { opacity: .26; filter: blur(120px); }
+:root[data-theme="aurora"] .blob-1 { background: #b14bff; }
+:root[data-theme="aurora"] .blob-2 { background: #ff3db4; }
+:root[data-theme="aurora"] .blob-3 { background: #22d3ee; }
+/* glowing gradient wordmark */
+:root[data-theme="aurora"] .topbar-title {
+    background: linear-gradient(90deg, #c77bff, #22d3ee 55%, #ff5cc0);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+}
+:root[data-theme="aurora"] .logo-icon { filter: drop-shadow(0 0 6px rgba(177,75,255,.6)); }
+/* neon gradient primary buttons + glow */
+:root[data-theme="aurora"] .btn-scan,
+:root[data-theme="aurora"] .btn-match {
+    background: linear-gradient(135deg, rgba(177,75,255,.32), rgba(34,211,238,.22));
+    border-color: rgba(177,75,255,.45);
+    color: #f1ecff;
+    box-shadow: 0 0 18px rgba(177,75,255,.20);
+}
+:root[data-theme="aurora"] .btn-rename {
+    background: linear-gradient(135deg, rgba(34,211,238,.30), rgba(52,211,153,.22));
+    border-color: rgba(34,211,238,.45);
+    color: #dafcff;
+    box-shadow: 0 0 18px rgba(34,211,238,.20);
+}
+:root[data-theme="aurora"] .glass-input:focus,
+:root[data-theme="aurora"] .glass-select:focus {
+    box-shadow: 0 0 0 2px var(--accent-t), 0 0 20px rgba(177,75,255,.28);
+}
+:root[data-theme="aurora"] .meta-ep { color: #d4b0ff; }
+
+/* ─────────── Theme picker (Settings) ─────────── */
+.theme-picker { display: flex; gap: 8px; }
+.theme-swatch {
+    flex: 1; cursor: pointer; padding: 8px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--glass-hover);
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    color: var(--txt2); font-size: 11px; transition: all .15s var(--ease);
+}
+.theme-swatch:hover { border-color: var(--border-hi); color: var(--txt); }
+.theme-swatch.active { border-color: var(--accent); color: var(--txt); box-shadow: 0 0 0 2px var(--accent-t); }
+.theme-dot {
+    width: 100%; height: 26px; border-radius: 6px; border: 1px solid var(--border);
+}
+.theme-dot.dot-dark   { background: linear-gradient(135deg, #08080d 40%, #6366f1); }
+.theme-dot.dot-light  { background: linear-gradient(135deg, #eef1f8 40%, #5145e8); }
+.theme-dot.dot-aurora { background: linear-gradient(135deg, #b14bff, #22d3ee 55%, #ff3db4); }

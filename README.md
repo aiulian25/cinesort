@@ -1,4 +1,4 @@
-# CineSort 🎬
+# CineSort
 
 **Professional media file organizer with intelligent metadata matching**
 
@@ -11,65 +11,65 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 
 ---
 
-## ✨ Features
+## Features
 
 ### Core
-- 🎯 **Smart Detection** — Automatically detects movies and TV shows from filenames (season, episode, year, quality tags, release group)
-- 🔍 **Multi-Source Metadata** — TMDb, TVMaze, and OMDb (IMDb), merged and ranked by confidence
-- 📝 **Flexible Renaming** — Template-based naming with a token palette and **live preview**, including flat in-place mode
-- ✏️ **Rename In-Place** — Rename files without moving them — works on NAS/SMB shares
-- 🔗 **Multiple Actions** — Rename, Move, Copy, Hard Link, Symlink, Dry-run (Test)
+- **Smart Detection** — Automatically detects movies and TV shows from filenames (season, episode, year, quality tags, release group)
+- **Multi-Source Metadata** — TMDb, TVMaze, and OMDb (IMDb), merged and ranked by confidence
+- **Flexible Renaming** — Template-based naming with a token palette and **live preview**, including flat in-place mode
+- **Rename In-Place** — Rename files without moving them — works on NAS/SMB shares
+- **Multiple Actions** — Rename, Move, Copy, Hard Link, Symlink, Dry-run (Test)
 
 ### Matching
-- 📊 **Cascade scoring + breakdown** — Multi-metric confidence score (name, year, S×E, absolute) with `original_title` awareness; the **View metadata** dialog shows *why* a match was chosen
-- 🟢🟡🔴 **Confidence gate** — High / Review / Low tiers; matches below 40% are flagged **review** and are **not** auto-selected for renaming, so a weak guess can never rename a file by accident
-- 🔁 **Smart fallback search** — Retries with the year dropped, then progressively trimmed titles, so noisy filenames still match
-- 🌀 **Anime / absolute numbering** — Cumulative absolute episode numbers are computed and matched
-- 📅 **Year disambiguation** — Auto-resolves same-named shows when the filename carries a year (skips an unnecessary prompt)
-- 🎬 **Adult-title support** — Optional Adult toggle unlocks TMDB results filtered by default; OMDb never filters
-- ✋ **Manual rename** — FileBot-style inline edit when auto-match fails: double-click, F2, or right-click → Edit
+- **Cascade scoring + breakdown** — Multi-metric confidence score (name, year, S×E, absolute) with `original_title` awareness; the **View metadata** dialog shows *why* a match was chosen
+- **Confidence gate** — High / Review / Low tiers; matches below 40% are flagged **review** and are **not** auto-selected for renaming, so a weak guess can never rename a file by accident
+- **Smart fallback search** — Retries with the year dropped, then progressively trimmed titles, so noisy filenames still match
+- **Anime / absolute numbering** — Cumulative absolute episode numbers are computed and matched
+- **Year disambiguation** — Auto-resolves same-named shows when the filename carries a year (skips an unnecessary prompt)
+- **Adult-title support** — Optional Adult toggle unlocks TMDB results filtered by default; OMDb never filters
+- **Manual rename** — FileBot-style inline edit when auto-match fails: double-click, F2, or right-click → Edit
 
 ### UI / UX
-- 🎨 **Modern flat UI, two themes** — **Dark** (default) and **Light**; switch in ⚙ Settings → Appearance, remembered per device
-- 📁 **Folder picker** — Native OS file/folder picker on desktop (reaches your whole filesystem); a rich in-app browser on Docker/web with a shortcuts sidebar, editable path + breadcrumb, type-ahead filter, "media only" toggle, cross-folder multi-select, and full keyboard navigation
-- 🧰 **Template builder** — Insert `{tokens}` from a palette and see a live preview of the resulting path
-- ⚡ **Bulk selection** — One-click "Matched", "≥60%", and "Clear unmatched"
-- ⚠️ **Inline conflict resolution** — Resolve duplicate/exists conflicts in place with **Skip** or **Rename → (2)**
-- 🖱️ **Drag & Drop** — Drop files or folders directly onto the left pane (deb/AppImage, Wayland-aware)
-- 🔄 **Row reordering** — Drag rows to manually remap files to matches
-- 🗑️ **Per-file Removal** — DEL key or right-click → Remove
-- 📂 **Show in folder** — Reveal the original file in your file manager (desktop)
-- 💾 **Remembers your setup** — Source, action, template, and last folder persist between sessions
-- 📊 **Rename History** — Full log with per-operation undo; native confirm dialogs replaced with themed ones
-- ♿ **Accessible** — ARIA roles + visible keyboard focus rings on lists and controls
-- ⚙️ **Settings Panel** — Enter API keys in-app; no terminal required for desktop installs
+- **Modern flat UI, two themes** — **Dark** (default) and **Light**; switch in Settings → Appearance, remembered per device
+- **Folder picker** — Native OS file/folder picker on desktop (reaches your whole filesystem); a rich in-app browser on Docker/web with a shortcuts sidebar, editable path + breadcrumb, type-ahead filter, "media only" toggle, cross-folder multi-select, and full keyboard navigation
+- **Template builder** — Insert `{tokens}` from a palette and see a live preview of the resulting path
+- **Bulk selection** — One-click "Matched", "≥60%", and "Clear unmatched"
+- **Inline conflict resolution** — Resolve duplicate/exists conflicts in place with **Skip** or **Rename → (2)**
+- **Drag & Drop** — Drop files or folders directly onto the left pane (deb/AppImage, Wayland-aware)
+- **Row reordering** — Drag rows to manually remap files to matches
+- **Per-file Removal** — DEL key or right-click → Remove
+- **Show in folder** — Reveal the original file in your file manager (desktop)
+- **Remembers your setup** — Source, action, template, and last folder persist between sessions
+- **Rename History** — Full log with per-operation undo; native confirm dialogs replaced with themed ones
+- **Accessible** — ARIA roles + visible keyboard focus rings on lists and controls
+- **Settings Panel** — Enter API keys in-app; no terminal required for desktop installs
 
 ### Platform & reliability
-- 🐳 **Docker Native** — ~180 MB image, runs anywhere
-- 🖥️ **Desktop App** — `.deb`, `.rpm`, and AppImage packages for Linux, x86_64 **and** arm64 (Electron shell)
-- 🔌 **Conflict-free launch** — Picks a free port automatically, so a stale/duplicate instance can never block startup
-- 🖼️ **Reliable rendering on Linux** — Software compositing avoids the all-black-window issue seen on Wayland/Intel (override with `CINESORT_ENABLE_GPU=1`)
-- 🔁 **Always-fresh UI** — Static assets sent with `Cache-Control: no-cache`, so a rebuilt container never serves stale JavaScript
-- 🤝 **No launcher collisions** — The AppImage won't shadow a deb install's menu entry, and stages itself to a stable path
-- 🔒 **Secure** — Non-root container, 0600 key file, contextIsolation, no eval
-- 🌐 **NAS/SMB Ready** — Actionable error messages for network mount limitations
+- **Docker Native** — ~180 MB image, runs anywhere
+- **Desktop App** — `.deb`, `.rpm`, and AppImage packages for Linux, x86_64 **and** arm64 (Electron shell)
+- **Conflict-free launch** — Picks a free port automatically, so a stale/duplicate instance can never block startup
+- **Reliable rendering on Linux** — Software compositing avoids the all-black-window issue seen on Wayland/Intel (override with `CINESORT_ENABLE_GPU=1`)
+- **Always-fresh UI** — Static assets sent with `Cache-Control: no-cache`, so a rebuilt container never serves stale JavaScript
+- **No launcher collisions** — The AppImage won't shadow a deb install's menu entry, and stages itself to a stable path
+- **Secure** — Non-root container, 0600 key file, contextIsolation, no eval
+- **NAS/SMB Ready** — Actionable error messages for network mount limitations
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Docker (recommended for servers / NAS)
 
 ```bash
 mkdir -p ~/cinesort && cd ~/cinesort
 wget https://raw.githubusercontent.com/aiulian25/cinesort/main/docker-compose.yml
-nano docker-compose.yml   # Set your media paths and optional API keys
+nano docker-compose.yml # Set your media paths and optional API keys
 docker compose up -d
 ```
 
 Open **http://localhost:8888** in your browser.
 
-> 🧩 **Multi-arch image — just pull, never build.** `aiulian25/cinesort:latest` is published as a multi-arch manifest covering **`linux/amd64`** and **`linux/arm64`**, so it runs out-of-the-box on x86 PCs/mini-PCs/servers **and** ARM devices (Synology DSM 7+, Raspberry Pi 4/5, Apple-silicon Docker). Docker automatically pulls the right architecture — no `--platform` flag and no local build required.
+> **Multi-arch image — just pull, never build.** `aiulian25/cinesort:latest` is published as a multi-arch manifest covering **`linux/amd64`** and **`linux/arm64`**, so it runs out-of-the-box on x86 PCs/mini-PCs/servers **and** ARM devices (Synology DSM 7+, Raspberry Pi 4/5, Apple-silicon Docker). Docker automatically pulls the right architecture — no `--platform` flag and no local build required.
 
 ### Desktop (deb / rpm / AppImage — x86_64 and arm64)
 
@@ -78,19 +78,19 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.0_amd64.deb      # arm64: cinesort_1.3.0_arm64.deb
-cinesort                    # or launch from your application menu
+sudo dpkg -i cinesort_1.3.0_amd64.deb # arm64: cinesort_1.3.0_arm64.deb
+cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.0.x86_64.rpm   # arm64: cinesort-1.3.0.aarch64.rpm
+sudo dnf install ./cinesort-1.3.0.x86_64.rpm # arm64: cinesort-1.3.0.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.0.AppImage           # arm64: CineSort-1.3.0-arm64.AppImage
+chmod +x CineSort-1.3.0.AppImage # arm64: CineSort-1.3.0-arm64.AppImage
 ./CineSort-1.3.0.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
@@ -99,13 +99,13 @@ On first launch the app **automatically** installs itself into your application 
 
 ---
 
-## 🔑 API Keys
+## API Keys
 
 ### Which keys do you need?
 
 | Source | Key required? | What it unlocks |
 |--------|:---:|---|
-| **TVMaze** | ✗ | Free TV episode data, no limits |
+| **TVMaze** | No | Free TV episode data, no limits |
 | **TMDb** | Optional | Movies + TV; your own key unlocks full API access. Adult titles require the Adult toggle. |
 | **OMDb** | Optional | IMDb data; automatically used as fallback when TMDb returns no results. Unlocks niche and adult titles without the Adult toggle. |
 
@@ -123,13 +123,13 @@ On first launch the app **automatically** installs itself into your application 
 
 ---
 
-## ⚙️ Adding API Keys
+## Adding API Keys
 
 ### Option A — In-app Settings (desktop installs, easiest)
 
-Click the **⚙ Settings** button in the top-right of the app.
+Click the **Settings** button in the top-right of the app.
 
-- Paste your key into the relevant field (👁 toggles visibility)
+- Paste your key into the relevant field (the eye button toggles visibility)
 - Click **Save & Apply**
 - Keys take effect immediately — **no restart required**
 - They are stored in `~/.config/cinesort/keys.env` with permissions `0600` (owner-read only) and survive app upgrades
@@ -178,7 +178,7 @@ Restart the app for changes to take effect when editing the file manually.
 
 ---
 
-## 📋 Configuration Reference
+## Configuration Reference
 
 ### Environment Variables
 
@@ -226,7 +226,7 @@ volumes:
 
 ---
 
-## 📖 Usage Guide
+## Usage Guide
 
 ### 1. Scan files
 
@@ -290,11 +290,11 @@ Or build your own: type tokens directly, or click them from the **token palette*
 
 ### Change the theme
 
-Open **⚙ Settings → Appearance** and pick **Dark**, **Light**, or **Aurora**. The choice applies instantly and is remembered on this device.
+Open ** Settings → Appearance** and pick **Dark**, **Light**, or **Aurora**. The choice applies instantly and is remembered on this device.
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Drag & Drop not working (deb / AppImage)
 
@@ -329,7 +329,7 @@ v1.2.5+ AppImages detect an installed deb and no longer create a shadowing entry
 
 ### OMDb source is greyed out / returns nothing
 
-OMDb requires a key. Click **⚙ Settings** and enter your key, or check that `OMDB_API_KEY` is set in `docker-compose.yml`.
+OMDb requires a key. Click **Settings** and enter your key, or check that `OMDB_API_KEY` is set in `docker-compose.yml`.
 
 ### Adult titles not appearing
 
@@ -358,24 +358,24 @@ Common causes: port 8888 already in use; volume path does not exist; invalid `PU
 ### Web UI unreachable
 
 ```bash
-docker ps | grep cinesort          # Is it running?
-curl http://localhost:8888          # Does it respond?
+docker ps | grep cinesort # Is it running?
+curl http://localhost:8888 # Does it respond?
 docker inspect cinesort | grep Health
 ```
 
 ---
 
-## 🔧 API Sources
+## API Sources
 
 | Source | Free | Key | Rate limit | Notes |
 |--------|:----:|:---:|-----------|-------|
-| **TMDb** | ✅ | Optional | ~50 req/s | Mainstream movies & TV; adult flag available |
-| **TVMaze** | ✅ | None | Reasonable use | TV only |
-| **OMDb** | ✅ | Required | 1,000/day (free tier) | IMDb data; no adult filtering |
+| **TMDb** | | Optional | ~50 req/s | Mainstream movies & TV; adult flag available |
+| **TVMaze** | | None | Reasonable use | TV only |
+| **OMDb** | | Required | 1,000/day (free tier) | IMDb data; no adult filtering |
 
 ---
 
-## 🛠️ Docker Compose Examples
+## Docker Compose Examples
 
 ### Minimal
 
@@ -436,16 +436,17 @@ volumes:
 
 ---
 
-## 📊 Technical Details
+## Technical Details
 
 | Item | Detail |
 |------|--------|
 | **Docker base** | Python 3.11 (Debian slim) |
 | **Image size** | ~180 MB |
 | **Docker architectures** | `linux/amd64` + `linux/arm64` (multi-arch manifest) |
-| **Desktop architectures** | amd64 / x86_64 (deb + AppImage) |
+| **Desktop architectures** | x86_64 + arm64 (deb, rpm, AppImage) |
 | **Runtime** | FastAPI + Uvicorn |
-| **RAM usage** | ~150 MB |
+| **RAM usage (Docker / server)** | ~150 MB — Python backend only; your browser renders the UI |
+| **RAM usage (desktop app)** | ~600-800 MB — the Electron shell embeds Chromium to render the UI, plus the same Python backend. Typical for Electron apps; use the Docker/web version on memory-constrained machines |
 | **Desktop shell** | Electron 35 |
 | **User** | Non-root (UID configurable via PUID) |
 | **Key storage** | `~/.config/cinesort/keys.env` — mode `0600` |
@@ -453,7 +454,7 @@ volumes:
 
 ---
 
-## 🚦 Building from Source
+## Building from Source
 
 ```bash
 git clone https://github.com/aiulian25/cinesort.git
@@ -465,12 +466,12 @@ docker compose -f docker-compose.dev.yml up -d
 **Desktop build:**
 ```bash
 npm install
-npm run build        # produces .deb and AppImage in dist/
+npm run build # produces .deb and AppImage in dist/
 ```
 
 ---
 
-## 📝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)
@@ -479,13 +480,13 @@ npm run build        # produces .deb and AppImage in dist/
 
 ---
 
-## 📜 License
+## License
 
 MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-## 📦 Changelog
+## Changelog
 
 ### v1.3.0
 - **Complete UI redesign** — flat, modern interface (glassmorphism and animated backgrounds removed): app bar with logo tile, options card with friendly template tokens (`{name}`, `{year}`, `{title}`, `{quality}` — old short tokens still work), footer action bar with live "N of M files ready", All/Matched/Unmatched view filter, and per-row status icons. Themes reduced to **Dark** and **Light**.
@@ -519,7 +520,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 - **Always-fresh assets** — `Cache-Control: no-cache` on the web UI so a rebuilt container never serves stale JavaScript (one hard refresh needed the first time).
 
 ### v1.2.2
-- **Three themes** — added **Light** and **Aurora** (neon-glass) alongside Dark, with a live theme picker in ⚙ Settings → Appearance (remembered per device).
+- **Three themes** — added **Light** and **Aurora** (neon-glass) alongside Dark, with a live theme picker in Settings → Appearance (remembered per device).
 - **Fixed non-working modal buttons** — Cancel / Close / Done in Settings, History, and dialogs now work (they were broken by a scope bug).
 - **Themed confirm dialogs** — replaced the off-theme native `confirm()` popups (Clear History, Undo) with in-app themed dialogs.
 - **Consistent dropdown colours** — the Source `<select>` menu now matches the theme.
@@ -532,7 +533,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 ### v1.2.0
 - **OMDb / IMDb source** — third metadata source backed by IMDb data; falls back automatically when TMDb returns no results. Requires a free API key (1,000 req/day).
 - **Adult-title support** — Adult checkbox in the toolbar passes `include_adult=true` to TMDb; OMDb never filters.
-- **In-app Settings panel** — ⚙ gear button opens a modal to enter/update API keys without touching a terminal or config file. Keys are saved to `~/.config/cinesort/keys.env` (mode 0600) and take effect immediately.
+- **In-app Settings panel** — gear button opens a modal to enter/update API keys without touching a terminal or config file. Keys are saved to `~/.config/cinesort/keys.env` (mode 0600) and take effect immediately.
 - **Manual rename (FileBot-style)** — When auto-match fails, double-click a row (or press F2, or right-click → Edit name manually) to type a custom filename. Extension is preserved automatically. Amber **manual** badge distinguishes manual entries from auto-matches. Right-click → Clear to revert.
 - **Drag & Drop fixed on deb / AppImage** — Electron sandbox is now configured programmatically (`--no-sandbox` flag + `chrome-sandbox` setuid) so DnD works without manual desktop-entry patching. Wayland sessions automatically switch to ozone/Wayland mode so file managers (Nautilus, Dolphin) can hand paths to the app.
 - **Improved movie scoring** — Uses `cascade_score` (year bonus/penalty, `original_title` comparison) instead of plain string similarity; score is capped at 1.0.
@@ -551,7 +552,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **TMDb** — Movie and TV metadata (https://www.themoviedb.org/)
 - **TVMaze** — TV show information (https://www.tvmaze.com/)
@@ -562,11 +563,11 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-## 📞 Support
+## Support
 
 - **Issues**: [GitHub Issues](https://github.com/aiulian25/cinesort/issues)
 - **Docker Hub**: [aiulian25/cinesort](https://hub.docker.com/r/aiulian25/cinesort)
 
 ---
 
-**Made with ❤️ for media enthusiasts**
+**Made with for media enthusiasts**

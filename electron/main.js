@@ -268,14 +268,37 @@ async function ensureUserVenv(sysPyPath) {
 }
 
 /**
+ * Verify a venv python can actually run the app: the interpreter executes AND
+ * the compiled C extensions import. Catches two arm64 failure modes the plain
+ * symlink check misses: (a) an x64 python binary on an arm64 host (ENOEXEC),
+ * and (b) a WORKING system-python symlink whose venv still carries the build
+ * machine's x86_64 .so files (pydantic-core etc. → ImportError). Without this
+ * probe both the fast path and the symlink repair "succeed" on arm64 and the
+ * server then dies at startup — spinner, timeout, no window.
+ */
+function probeVenv(pythonPath) {
+    try {
+        execFileSync(pythonPath, ["-c", "import pydantic_core, uvicorn, httpx"], {
+            stdio: "ignore",
+            timeout: 15000,
+        });
+        return true;
+    } catch (e) {
+        console.warn(`[main] venv probe failed for ${pythonPath}: ${e.message}`);
+        return false;
+    }
+}
+
+/**
  * Locate or repair the Python interpreter to use.
  *
  * Strategy (in order):
- *   1. Bundled venv symlink valid → use it directly (fast path, no repairs).
- *   2. Bundled venv symlink broken + system has EXACT same minor version
- *      → repair symlinks (no network, instant).
- *   3. Bundled venv symlink broken + system has DIFFERENT compatible version
- *      → build a user venv in ~/.local/share/cinesort/venv (one-time pip install).
+ *   1. Bundled venv symlink valid AND probe passes → use it (fast path).
+ *   2. Broken/unprobeable + system has EXACT same minor version
+ *      → repair symlinks (no network, instant), re-probe.
+ *   3. Still unusable (different version, or foreign-arch .so files)
+ *      → build a user venv in ~/.local/share/cinesort/venv (one-time pip
+ *        install — needs network; this is the normal first launch on arm64).
  *   4. Dev mode → use .venv in project root.
  *
  * Returns { python: string, firstRun: boolean }
@@ -291,16 +314,16 @@ async function findOrCreatePython() {
 
     const venvPython = path.join(venvDir, "bin", "python3");
 
-    // ── Fast path: bundled venv symlink is valid ──────────────────────────────
+    // ── Fast path: bundled venv symlink is valid AND actually runs ────────────
     try {
         const real = fs.realpathSync(venvPython);
-        if (fs.existsSync(real)) {
+        if (fs.existsSync(real) && probeVenv(venvPython)) {
             console.log(`[main] Bundled venv OK: ${real}`);
             return { python: venvPython, firstRun: false };
         }
     } catch {}
 
-    console.warn("[main] Bundled venv Python symlink is broken — attempting repair…");
+    console.warn("[main] Bundled venv is broken or wrong-arch — attempting repair…");
 
     const venvVer = readVenvPythonVersion(venvDir);
     const preferMinor = venvVer ? venvVer.minor : null;
@@ -324,11 +347,13 @@ async function findOrCreatePython() {
     }
 
     // ── Repair path: system Python matches the venv's built-for version ───────
+    // Re-probe after the repair: on arm64 the symlink fix "succeeds" but the
+    // bundled x86_64 .so files still can't import — fall through to user venv.
     if (venvVer && sysPy.minor === venvVer.minor) {
-        if (fixVenvSymlinks(venvDir, venvVer, sysPy.path)) {
+        if (fixVenvSymlinks(venvDir, venvVer, sysPy.path) && probeVenv(venvPython)) {
             return { python: venvPython, firstRun: false };
         }
-        // fixVenvSymlinks failed (permissions?) — fall through to user venv
+        // repair failed or venv still unusable (foreign arch) — user venv below
     }
 
     // ── Rebuild path: different version → create user venv ───────────────────
@@ -398,7 +423,7 @@ function startPython(python) {
                 const key   = trimmed.slice(0, eq).trim();
                 const value = trimmed.slice(eq + 1).trim();
                 // Only inject managed keys; never overwrite existing env vars
-                if (["TMDB_API_KEY", "OMDB_API_KEY"].includes(key) && !(key in childEnv) && value) {
+                if (["TMDB_API_KEY", "OMDB_API_KEY", "TMDB_LANGUAGE"].includes(key) && !(key in childEnv) && value) {
                     childEnv[key] = value;
                     console.log(`[main] Loaded ${key} from keys.env`);
                 }
@@ -600,7 +625,7 @@ app.whenReady().then(async () => {
         minHeight: 500,
         title: "CineSort",
         icon: icon,
-        backgroundColor: "#08080d",
+        backgroundColor: "#0a0a0b",
         autoHideMenuBar: true,
         webPreferences: {
             nodeIntegration: false,

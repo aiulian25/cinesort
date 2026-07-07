@@ -24,7 +24,16 @@ from pathlib import Path
 
 # ── Config file location ───────────────────────────────────────────────────────
 def _config_dir() -> Path:
-    """Return the XDG-compliant config directory for CineSort."""
+    """Return the config directory for CineSort.
+
+    CINESORT_DATA_DIR takes priority (the Docker image sets it to /data, a
+    persistent volume) so keys saved from the Settings UI survive container
+    recreation. When unset (deb/AppImage/dev), the XDG-compliant per-user
+    location is used — identical to the historical behavior.
+    """
+    dd = os.environ.get("CINESORT_DATA_DIR")
+    if dd:
+        return Path(dd) / "config"
     xdg = os.environ.get("XDG_CONFIG_HOME", "")
     base = Path(xdg) if xdg else Path.home() / ".config"
     return base / "cinesort"
@@ -35,14 +44,25 @@ def config_file() -> Path:
 
 
 # ── Keys we manage ─────────────────────────────────────────────────────────────
-MANAGED_KEYS = ("TMDB_API_KEY", "OMDB_API_KEY")
+MANAGED_KEYS = ("TMDB_API_KEY", "OMDB_API_KEY", "TMDB_LANGUAGE")
 
 # Simple validation: printable ASCII, no whitespace, reasonable length.
 # Prevents storing obviously bogus or injection-risky values.
 _KEY_RE = re.compile(r'^[\x21-\x7E]{8,256}$')
 
+# TMDB_LANGUAGE is an ISO code ("de" or "de-DE"), far shorter than an API key.
+_LANG_RE = re.compile(r'^[a-z]{2}(-[A-Z]{2})?$')
+
+
+def _validate_for(key: str, value: str) -> bool:
+    """Per-key validation rule (API keys vs. the short language code)."""
+    if key == "TMDB_LANGUAGE":
+        return bool(_LANG_RE.fullmatch(value))
+    return bool(_KEY_RE.match(value))
+
 
 def _validate_key(value: str) -> bool:
+    # Kept for backward compatibility; API-key rule only.
     return bool(_KEY_RE.match(value))
 
 
@@ -106,7 +126,7 @@ def save_config(updates: dict[str, str]) -> None:
         if value == "":
             existing.pop(key, None)
             os.environ.pop(key, None)
-        elif _validate_key(value):
+        elif _validate_for(key, value):
             existing[key] = value
             os.environ[key] = value   # hot-reload for current process
         # else: invalid value — silently skip (caller should validate UI-side too)

@@ -1,0 +1,112 @@
+/* ═══════════════════════════════════════════════════════════════
+   CineSort — Design tokens
+   Dark is the default (:root); light overrides via [data-theme="light"].
+   Rules: no backdrop-filter anywhere; every color in style.css must
+   come from these tokens — no hardcoded hex outside this file.
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+    /* Surfaces */
+    --canvas: #0a0a0b;             /* app background */
+    --surface-1: #151517;          /* cards, panels, modals */
+    --surface-2: #1c1c1f;          /* inputs, hover, nested surfaces */
+    --surface-3: #232327;          /* chips, active controls */
+    --border: #26262b;
+    --border-strong: #3a3a41;
+
+    /* Text */
+    --txt: #f4f4f5;
+    --txt2: #a1a1aa;
+    --txt3: #6d6d76;
+
+    /* Brand / primary action */
+    --accent: #2563eb;
+    --accent-hover: #3b76f6;
+    --accent-active: #1d4fd7;
+    --on-accent: #ffffff;
+    --accent-t: rgba(37, 99, 235, .18);
+
+    /* Semantic */
+    --green: #4ade80;
+    --green-t: rgba(34, 197, 94, .13);
+    --amber: #d9a662;
+    --amber-t: rgba(180, 120, 40, .16);
+    --red: #f87171;
+    --red-t: rgba(239, 68, 68, .15);
+    --info: #7dd3fc;
+    --info-t: rgba(56, 189, 248, .12);
+    --orange: #f97316;             /* "Include subfolders" checkbox, per design */
+
+    /* Inverted segment (All/Matched/Unmatched active pill) + logo tile */
+    --seg-active-bg: #f4f4f5;
+    --seg-active-txt: #101012;
+    --logo-tile: #f4f4f5;
+
+    /* Chrome */
+    --scrim: rgba(3, 4, 6, .62);
+    --menu-bg: #1c1c1f;            /* solid bg for <select> popups */
+    --input-bg: #1c1c1f;
+    --glass: var(--surface-1);     /* legacy alias — panels are opaque now */
+    --glass-hover: var(--surface-2);
+    --glass-active: var(--surface-3);
+    --row-dim: #55555e;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .45);
+    --shadow-md: 0 4px 14px rgba(0, 0, 0, .45);
+    --shadow-lg: 0 14px 36px rgba(0, 0, 0, .55);
+    --panel-shadow: var(--shadow-sm);
+
+    /* Shape, type, motion */
+    --radius: 12px;
+    --radius-sm: 9px;
+    --radius-xs: 7px;
+    --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+    --ease: cubic-bezier(.4, 0, .2, 1);
+    --row-h: 42px;
+}
+
+/* ─────────── LIGHT ─────────── */
+:root[data-theme="light"] {
+    --canvas: #f4f4f6;
+    --surface-1: #ffffff;
+    --surface-2: #f1f1f3;
+    --surface-3: #e9e9ec;
+    --border: #e2e2e6;
+    --border-strong: #cfcfd6;
+
+    --txt: #18181b;
+    --txt2: #55555e;
+    --txt3: #8b8b95;
+
+    --accent: #2563eb;
+    --accent-hover: #1d4fd7;
+    --accent-active: #1a45bd;
+    --on-accent: #ffffff;
+    --accent-t: rgba(37, 99, 235, .12);
+
+    --green: #157a3d;
+    --green-t: rgba(21, 122, 61, .12);
+    --amber: #995f1c;
+    --amber-t: rgba(153, 95, 28, .13);
+    --red: #b91c1c;
+    --red-t: rgba(185, 28, 28, .10);
+    --info: #0369a1;
+    --info-t: rgba(3, 105, 161, .10);
+    --orange: #f97316;
+
+    --seg-active-bg: #18181b;
+    --seg-active-txt: #ffffff;
+    --logo-tile: #18181b;
+
+    --scrim: rgba(20, 24, 40, .32);
+    --menu-bg: #ffffff;
+    --input-bg: #f1f1f3;
+    --row-dim: #a6a6af;
+    --shadow-sm: 0 1px 2px rgba(24, 24, 27, .06);
+    --shadow-md: 0 6px 16px rgba(24, 24, 27, .08);
+    --shadow-lg: 0 12px 32px rgba(24, 24, 27, .14);
+    --panel-shadow: var(--shadow-sm);
+}
+
+/* Light theme: the logo image sits on a dark tile, so no swap needed;
+   the glyph itself ships as a PNG and reads on both tile colors. */

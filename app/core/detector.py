@@ -37,6 +37,11 @@ class DetectionResult:
     source: Optional[str] = None
     video_format: Optional[str] = None
     original_filename: str = ""
+    # Music-only fields (parse_music_info); None for video/subtitle files.
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    track: Optional[int] = None
+    title: Optional[str] = None
 
 
 # ---------- Video file extensions ----------
@@ -217,6 +222,14 @@ def parse_episode_info(name: str) -> Optional[EpisodeInfo]:
         if not m:
             continue
 
+        # A full date (YYYY.MM.DD / YYYY-MM-DD) must win over pseudo-SxE
+        # fragments inside it: dot-notation would read "03.05" out of
+        # "2024.03.05" as S03E05, and the range pattern would read "03-05"
+        # out of "2024-03-05" as episodes 3–5 — so a daily-show file never
+        # reached the date fallback below.
+        if dm and m.start() >= dm.start() and m.end() <= dm.end():
+            continue
+
         groups = m.groups()
 
         # Pattern 0: Verbose Season X Episode Y[-Z]
@@ -288,17 +301,23 @@ def clean_name(name: str, episode_info: Optional[EpisodeInfo] = None) -> str:
     # Remove file extension
     name = Path(name).stem
 
-    # Cut at the season/episode marker
+    # Cut at the season/episode marker — but ignore pseudo-SxE fragments that
+    # sit inside a full date (see parse_episode_info); those files cut at the
+    # date instead, so "The.Daily.Show.2024.03.05" cleans to "The Daily Show".
+    dm = DATE_PATTERN.search(name)
+    cut = None
     for pattern in SXE_PATTERNS:
         m = pattern.search(name)
-        if m:
-            name = name[:m.start()]
-            break
-    else:
-        # If no SxE found, cut at date
-        dm = DATE_PATTERN.search(name)
-        if dm:
-            name = name[:dm.start()]
+        if not m:
+            continue
+        if dm and m.start() >= dm.start() and m.end() <= dm.end():
+            continue
+        cut = m.start()
+        break
+    if cut is None and dm:
+        cut = dm.start()
+    if cut is not None:
+        name = name[:cut]
 
     # Cut at year for movies
     ym = YEAR_PATTERN.search(name)
@@ -362,6 +381,43 @@ def extract_source(filename: str) -> Optional[str]:
     return m.group(0) if m else None
 
 
+def parse_music_info(stem: str) -> tuple[Optional[str], Optional[int], Optional[str], Optional[str]]:
+    """Parse an audio filename stem into (artist, track, album, title).
+
+    Handles the common layouts, most-specific first:
+      Artist - Album - NN - Title
+      NN - Artist - Title
+      Artist - NN - Title
+      NN - Title
+      Artist - Title
+      Title
+    Separators: " - " primarily; underscores are normalized to spaces first.
+    """
+    s = re.sub(r'[_]+', ' ', stem).strip()
+    parts = [p.strip() for p in s.split(" - ") if p.strip()]
+
+    def is_track(p: str) -> bool:
+        return bool(re.fullmatch(r'\d{1,3}', p)) and len(p) <= 3
+
+    artist = album = title = None
+    track: Optional[int] = None
+
+    if len(parts) >= 4 and is_track(parts[2]):
+        artist, album, track, title = parts[0], parts[1], int(parts[2]), " - ".join(parts[3:])
+    elif len(parts) == 3 and is_track(parts[0]):
+        track, artist, title = int(parts[0]), parts[1], parts[2]
+    elif len(parts) == 3 and is_track(parts[1]):
+        artist, track, title = parts[0], int(parts[1]), parts[2]
+    elif len(parts) == 2 and is_track(parts[0]):
+        track, title = int(parts[0]), parts[1]
+    elif len(parts) == 2:
+        artist, title = parts[0], parts[1]
+    elif parts:
+        title = parts[0]
+
+    return artist, track, album, title
+
+
 def classify_file(path: Path) -> MediaType:
     """Classify a file as series, movie, music, or unknown.
     Ported from FileBot's AutoDetection logic."""
@@ -394,6 +450,24 @@ def detect(path: Path) -> DetectionResult:
     """Full detection pipeline for a media file."""
     filename = path.name
     media_type = classify_file(path)
+
+    # Audio files get music parsing — the video pipeline's SxE/noise stripping
+    # would mangle "Artist - Title" stems.
+    if media_type == MediaType.MUSIC:
+        artist, track, album, title = parse_music_info(Path(filename).stem)
+        clean = " - ".join(x for x in (artist, title) if x) or Path(filename).stem
+        return DetectionResult(
+            media_type=media_type,
+            clean_name=clean,
+            episode_info=None,
+            year=extract_year(filename),
+            original_filename=filename,
+            artist=artist,
+            album=album,
+            track=track,
+            title=title,
+        )
+
     ep = parse_episode_info(filename)
     name = clean_name(filename, ep)
 

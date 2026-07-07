@@ -10,7 +10,7 @@ FROM python:${PYTHON_VERSION}-slim
 
 LABEL maintainer="CineSort <app@cinesort.local>"
 LABEL description="Professional media file organizer with smart metadata matching"
-LABEL version="1.2.6"
+LABEL version="1.3.0"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -19,6 +19,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     CINESORT_HOST=0.0.0.0 \
     CINESORT_PORT=8888 \
+    CINESORT_DATA_DIR=/data \
     PUID=1000 \
     PGID=1000
 

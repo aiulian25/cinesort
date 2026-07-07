@@ -31,10 +31,15 @@ chown -R "$PUID:$PGID" /data 2>/dev/null || true
 chown -R "$PUID:$PGID" /app 2>/dev/null || true
 
 # Create history file if it doesn't exist
+# (CINESORT_DATA_DIR=/data makes this the real store the app reads/writes)
 if [ ! -f "/data/history.json" ]; then
     echo "[]" > /data/history.json
     chown "$PUID:$PGID" /data/history.json
 fi
+
+# Config dir for UI-saved API keys (keys.env, written 0600 by the app)
+mkdir -p /data/config
+chown "$PUID:$PGID" /data/config
 
 echo "Data directory: /data"
 echo "Media directory: /media (mount your media here)"

@@ -68,6 +68,14 @@ def apply_template(template: str, bindings: dict[str, Any]) -> str:
 
     all_bindings = {**bindings, **derived}
 
+    # Friendly token aliases (flat-UI redesign): {name} {year} {title} {quality}
+    # resolve to the short canonical bindings, so both spellings work in any
+    # template. Resolved here — the single formatting path shared by matching,
+    # live preview, and every build target — never per-endpoint.
+    for alias, key in (("name", "n"), ("year", "y"), ("title", "t"), ("quality", "vf")):
+        if alias not in all_bindings:
+            all_bindings[alias] = all_bindings.get(key)
+
     def replacer(m: re.Match) -> str:
         key = m.group(1)
         val = all_bindings.get(key)

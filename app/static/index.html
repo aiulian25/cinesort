@@ -5,100 +5,37 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CineSort - Media Organizer</title>
     <link rel="icon" type="image/png" href="/CineSort.png">
-    <!-- Apply saved theme before first paint to avoid a flash of the wrong theme -->
+    <!-- Apply saved theme before first paint to avoid a flash of the wrong theme.
+         Only "dark" and "light" ship; a previously-saved "aurora" falls back to dark. -->
     <script>
         try {
             var _p = JSON.parse(localStorage.getItem("cinesort.prefs.v1") || "{}");
-            if (_p && ["dark", "light", "aurora"].indexOf(_p.theme) !== -1)
+            if (_p && ["dark", "light"].indexOf(_p.theme) !== -1)
                 document.documentElement.setAttribute("data-theme", _p.theme);
         } catch (e) {}
     </script>
+    <link rel="stylesheet" href="/static/tokens.css">
     <link rel="stylesheet" href="/static/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
-    <!-- Background -->
-    <div class="bg-blobs">
-        <div class="blob blob-1"></div>
-        <div class="blob blob-2"></div>
-        <div class="blob blob-3"></div>
-    </div>
-
     <div class="app">
-        <!-- ═══ Top Bar ═══ -->
-        <header class="glass-panel topbar">
-            <div class="topbar-left">
-                <img src="/CineSort.png" alt="CineSort" class="logo-icon" width="28" height="28" style="border-radius:6px">
-                <span class="topbar-title">CineSort</span>
+        <!-- ═══ App bar ═══ -->
+        <header class="appbar">
+            <div class="logo-tile" aria-hidden="true">
+                <img src="/static/logo_tile.png" alt="" width="38" height="38">
             </div>
-            <div class="topbar-center">
-                <div class="toolbar">
-                    <div class="toolbar-group">
-                        <label class="toolbar-label">Source</label>
-                        <select id="datasource" class="glass-select">
-                            <optgroup label="Episodes">
-                                <option value="tmdb">TMDb</option>
-                                <option value="tvmaze">TVmaze</option>
-                            </optgroup>
-                            <optgroup label="Movies">
-                                <option value="omdb">OMDb (IMDb)</option>
-                            </optgroup>
-                        </select>
-                    </div>
-                    <div class="toolbar-group">
-                        <label class="toolbar-label cb-label" title="Include adult-rated titles in TMDB and OMDb search results">
-                            <input type="checkbox" id="include-adult">
-                            <span>Adult</span>
-                        </label>
-                    </div>
-                    <div class="toolbar-group">
-                        <label class="toolbar-label">Action</label>
-                        <select id="action" class="glass-select">
-                            <option value="rename">Rename (in-place)</option>
-                            <option value="test">Test (Dry Run)</option>
-                            <option value="move">Move</option>
-                            <option value="copy">Copy</option>
-                            <option value="hardlink">Hard Link</option>
-                            <option value="symlink">Symlink</option>
-                        </select>
-                    </div>
-                    <div class="toolbar-group template-group">
-                        <label class="toolbar-label">Template</label>
-                        <input type="text" id="template" class="glass-input mono"
-                               value="{n}/Season {s}/{n} - {s00e00} - {t}" spellcheck="false">
-                        <div class="template-presets">
-                            <button class="preset-btn" data-template="{n}/Season {s}/{n} - {s00e00} - {t}" title="TV Series (organise into folders)">TV</button>
-                            <button class="preset-btn" data-template="{n} ({y})/{n} ({y})" title="Movie (organise into folder)">Film</button>
-                            <button class="preset-btn" data-template="{n}/{n} - {absolute} - {t}" title="Anime (organise into folder)">Anime</button>
-                            <button class="preset-btn" data-template="{n} - {s00e00} - {t}" title="Rename in-place (no folder creation)">Flat</button>
-                        </div>
-                        <div class="template-tokens" id="template-tokens" aria-label="Insert template token">
-                            <button class="token-btn" data-token="{n}" title="Name">n</button>
-                            <button class="token-btn" data-token="{y}" title="Year">y</button>
-                            <button class="token-btn" data-token="{s00e00}" title="S00E00">s00e00</button>
-                            <button class="token-btn" data-token="{t}" title="Title">t</button>
-                            <button class="token-btn" data-token="{absolute}" title="Absolute episode #">abs</button>
-                            <button class="token-btn" data-token="{source}" title="Source (WEB-DL…)">src</button>
-                            <button class="token-btn" data-token="{vf}" title="Video format (1080p…)">vf</button>
-                            <button class="token-btn" data-token="{group}" title="Release group">grp</button>
-                        </div>
-                        <div class="template-preview" id="template-preview" title="Live preview against the first file"></div>
-                    </div>
-                </div>
+            <div class="app-id">
+                <div class="app-name">CineSort</div>
+                <div class="app-tag">Scan, match, and rename your media</div>
             </div>
-            <div class="topbar-right">
-                <button id="btn-settings" class="glass-btn" title="API key settings">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                    Settings
-                </button>
+            <div class="appbar-actions">
                 <button id="btn-history" class="glass-btn" title="View rename history">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
                     History
                 </button>
-                <button id="btn-rename" class="glass-btn btn-rename" disabled>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
-                    Rename
+                <button id="btn-settings" class="glass-btn" title="Theme and API key settings">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>
+                    Settings
                 </button>
             </div>
         </header>
@@ -113,23 +50,97 @@
             <button id="banner-dismiss" class="banner-dismiss" title="Dismiss">&times;</button>
         </div>
 
-        <!-- ═══ Scan Bar ═══ -->
-        <div class="glass-panel scanbar">
-            <svg class="scanbar-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-            <input type="text" id="scan-path" class="scanbar-input" placeholder="Enter folder path or drag &amp; drop files here…" spellcheck="false">
+        <!-- ═══ Options card ═══ -->
+        <section class="options glass-panel">
+            <div class="options-grid">
+                <div class="field field-source">
+                    <label class="field-label" for="datasource">Source</label>
+                    <select id="datasource" class="glass-select">
+                        <optgroup label="Episodes">
+                            <option value="tmdb">TMDb</option>
+                            <option value="tvmaze">TVmaze</option>
+                        </optgroup>
+                        <optgroup label="Movies">
+                            <option value="omdb">OMDb (IMDb)</option>
+                        </optgroup>
+                        <optgroup label="Music">
+                            <option value="musicbrainz">MusicBrainz</option>
+                        </optgroup>
+                    </select>
+                    <label class="cb-label cb-sm" title="Include adult-rated titles in TMDB and OMDb search results">
+                        <input type="checkbox" id="include-adult">
+                        <span>Adult titles</span>
+                    </label>
+                </div>
+                <div class="field">
+                    <label class="field-label" for="action">Action</label>
+                    <!-- Static fallback list; rebuilt from GET /api/actions at startup
+                         so the options always mirror the backend's RenameAction enum. -->
+                    <select id="action" class="glass-select">
+                        <option value="rename">Rename (in-place)</option>
+                        <option value="test">Test (Dry Run)</option>
+                        <option value="move">Move</option>
+                        <option value="keeplink">Move + Keep Link</option>
+                        <option value="copy">Copy</option>
+                        <option value="hardlink">Hard Link</option>
+                        <option value="symlink">Symlink</option>
+                    </select>
+                </div>
+                <div class="field field-template">
+                    <label class="field-label" for="template">Naming template</label>
+                    <input type="text" id="template" class="glass-input mono"
+                           value="{name}/Season {s}/{name} - {s00e00} - {title}" spellcheck="false">
+                </div>
+            </div>
+            <div class="template-row">
+                <span class="row-label">Insert:</span>
+                <div class="template-tokens" id="template-tokens" aria-label="Insert template token">
+                    <button class="token-btn" data-token="{name}" title="Series / movie name">name</button>
+                    <button class="token-btn" data-token="{year}" title="Year">year</button>
+                    <button class="token-btn" data-token="{s00e00}" title="S00E00">s00e00</button>
+                    <button class="token-btn" data-token="{title}" title="Episode title">title</button>
+                    <button class="token-btn" data-token="{absolute}" title="Absolute episode #">abs</button>
+                    <button class="token-btn" data-token="{source}" title="Source (WEB-DL…)">source</button>
+                    <button class="token-btn" data-token="{quality}" title="Video quality (1080p…)">quality</button>
+                    <button class="token-btn" data-token="{group}" title="Release group">group</button>
+                </div>
+                <span class="row-label presets-label">Presets:</span>
+                <div class="template-presets">
+                    <button class="preset-btn" data-template="{name}/Season {s}/{name} - {s00e00} - {title}" title="TV Series (organise into folders)">TV</button>
+                    <button class="preset-btn" data-template="{name} ({year})/{name} ({year})" title="Movie (organise into folder)">Film</button>
+                    <button class="preset-btn" data-template="{name}/{name} - {absolute} - {title}" title="Anime (organise into folder)">Anime</button>
+                    <button class="preset-btn" data-template="{name} - {s00e00} - {title}" title="Rename in-place (no folder creation)">Flat</button>
+                    <button class="preset-btn" data-template="{artist}/{album}/{track} - {title}" title="Music (organise into artist/album folders)">Music</button>
+                </div>
+            </div>
+            <div class="template-preview" id="template-preview" title="Live preview against the first file"></div>
+        </section>
+
+        <!-- ═══ Scan bar ═══ -->
+        <section class="scanbar glass-panel">
+            <div class="path-wrap">
+                <svg class="scanbar-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+                <input type="text" id="scan-path" class="scanbar-input" placeholder="Enter a folder path, or drag &amp; drop files here…" spellcheck="false">
+            </div>
+            <label class="cb-label"><input type="checkbox" id="recursive" checked><span>Include subfolders</span></label>
             <button id="btn-browse" class="glass-btn" title="Browse for a folder">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                     <circle cx="12" cy="13" r="2"/>
                 </svg>
                 Browse
             </button>
-            <label class="cb-label"><input type="checkbox" id="recursive" checked><span>Recursive</span></label>
-            <button id="btn-scan" class="glass-btn btn-scan">Scan</button>
-            <button id="btn-match" class="glass-btn btn-match" disabled>Match</button>
-        </div>
+            <button id="btn-scan" class="glass-btn">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
+                Scan
+            </button>
+            <button id="btn-match" class="glass-btn btn-primary" disabled>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+                Match
+            </button>
+        </section>
 
         <!-- ═══ Status ═══ -->
         <div id="status-bar" class="statusbar hidden">
@@ -138,18 +149,17 @@
         </div>
 
         <!-- ═══ Dual-pane Match Area ═══ -->
-        <div class="dual-pane" id="dual-pane">
+        <div class="dual-pane glass-panel" id="dual-pane">
 
             <!-- LEFT: Original Files -->
-            <div class="pane pane-left glass-panel" id="pane-left">
+            <div class="pane pane-left" id="pane-left">
                 <div class="pane-header">
-                    <span class="pane-title">Original Files</span>
-                    <div class="bulk-actions" id="bulk-actions">
-                        <button class="bulk-btn" id="bulk-matched" title="Select only files that matched">Matched</button>
-                        <button class="bulk-btn" id="bulk-high" title="Select only confident matches (≥60%)">≥60%</button>
-                        <button class="bulk-btn" id="bulk-clear-unmatched" title="Deselect files with no match">Clear unmatched</button>
+                    <span class="pane-title">Original files <span class="pane-count" id="left-count">0</span></span>
+                    <div class="seg-filter" id="view-filter" role="group" aria-label="Filter files">
+                        <button class="seg-btn on" data-filter="all">All</button>
+                        <button class="seg-btn" data-filter="matched">Matched</button>
+                        <button class="seg-btn" data-filter="unmatched">Unmatched</button>
                     </div>
-                    <span class="pane-count" id="left-count">0</span>
                 </div>
                 <div class="pane-list" id="left-list" role="listbox" aria-multiselectable="true" aria-label="Original files">
                     <div class="drop-zone active" id="drop-zone">
@@ -164,17 +174,14 @@
                 </div>
             </div>
 
-            <!-- CENTER: Arrow gutter -->
-            <div class="gutter" id="gutter"></div>
-
             <!-- RIGHT: New Names -->
-            <div class="pane pane-right glass-panel" id="pane-right">
+            <div class="pane pane-right" id="pane-right">
                 <div class="pane-header">
-                    <span class="pane-title">New Names</span>
-                    <span class="score-legend" title="Match confidence">
-                        <span class="lg lg-hi">High</span><span class="lg lg-mid">Review</span><span class="lg lg-lo">Low</span>
-                    </span>
-                    <span class="pane-count" id="right-count">0</span>
+                    <span class="pane-title">New names<span class="pane-count hidden" id="right-count">0</span></span>
+                    <div class="stat-chips">
+                        <span class="stat stat-hi hidden" id="stat-high"></span>
+                        <span class="stat stat-review hidden" id="stat-review"></span>
+                    </div>
                 </div>
                 <div class="pane-list" id="right-list" role="listbox" aria-label="New names">
                     <div class="empty-right">
@@ -183,6 +190,20 @@
                 </div>
             </div>
         </div>
+
+        <!-- ═══ Footer action bar ═══ -->
+        <footer class="actionbar glass-panel">
+            <div class="footer-hint">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+                <span id="footer-hint-action" class="action-hint-text"></span>
+                <b id="footer-ready" class="footer-ready"></b>
+            </div>
+            <button id="btn-review" class="glass-btn hidden" title="Jump to the first match that needs review">Review</button>
+            <button id="btn-rename" class="glass-btn btn-primary btn-rename" disabled>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+                <span class="btn-label">Rename</span>
+            </button>
+        </footer>
 
         <!-- Floating "scroll to top" — appears once the file list is scrolled down -->
         <button id="go-top" class="go-top" title="Scroll to top" aria-label="Scroll to top">

@@ -2,12 +2,12 @@
 
 **Professional media file organizer with intelligent metadata matching**
 
-CineSort automatically detects, matches, and renames your movies and TV shows using metadata from TMDb, TVMaze, and OMDb (IMDb). Run it as a lightweight Docker container **or** install it as a native desktop app (`.deb` / AppImage) with a modern web interface.
+CineSort automatically detects, matches, and renames your movies, TV shows, and music using metadata from TMDb, TVMaze, OMDb (IMDb), and MusicBrainz. Run it as a lightweight Docker container **or** install it as a native desktop app (`.deb` / `.rpm` / AppImage) with a modern web interface.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.2.6-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.0-green.svg)
 
 ---
 
@@ -30,7 +30,7 @@ CineSort automatically detects, matches, and renames your movies and TV shows us
 - ✋ **Manual rename** — FileBot-style inline edit when auto-match fails: double-click, F2, or right-click → Edit
 
 ### UI / UX
-- 🎨 **Three themes** — **Dark** (default), **Light**, and **Aurora** (a neon-glass theme); switch in ⚙ Settings → Appearance, remembered per device
+- 🎨 **Modern flat UI, two themes** — **Dark** (default) and **Light**; switch in ⚙ Settings → Appearance, remembered per device
 - 📁 **Folder picker** — Native OS file/folder picker on desktop (reaches your whole filesystem); a rich in-app browser on Docker/web with a shortcuts sidebar, editable path + breadcrumb, type-ahead filter, "media only" toggle, cross-folder multi-select, and full keyboard navigation
 - 🧰 **Template builder** — Insert `{tokens}` from a palette and see a live preview of the resulting path
 - ⚡ **Bulk selection** — One-click "Matched", "≥60%", and "Clear unmatched"
@@ -46,7 +46,7 @@ CineSort automatically detects, matches, and renames your movies and TV shows us
 
 ### Platform & reliability
 - 🐳 **Docker Native** — ~180 MB image, runs anywhere
-- 🖥️ **Desktop App** — `.deb` and AppImage packages for Linux (Electron shell)
+- 🖥️ **Desktop App** — `.deb`, `.rpm`, and AppImage packages for Linux, x86_64 **and** arm64 (Electron shell)
 - 🔌 **Conflict-free launch** — Picks a free port automatically, so a stale/duplicate instance can never block startup
 - 🖼️ **Reliable rendering on Linux** — Software compositing avoids the all-black-window issue seen on Wayland/Intel (override with `CINESORT_ENABLE_GPU=1`)
 - 🔁 **Always-fresh UI** — Static assets sent with `Cache-Control: no-cache`, so a rebuilt container never serves stale JavaScript
@@ -71,22 +71,31 @@ Open **http://localhost:8888** in your browser.
 
 > 🧩 **Multi-arch image — just pull, never build.** `aiulian25/cinesort:latest` is published as a multi-arch manifest covering **`linux/amd64`** and **`linux/arm64`**, so it runs out-of-the-box on x86 PCs/mini-PCs/servers **and** ARM devices (Synology DSM 7+, Raspberry Pi 4/5, Apple-silicon Docker). Docker automatically pulls the right architecture — no `--platform` flag and no local build required.
 
-### Desktop (deb / AppImage)
+### Desktop (deb / rpm / AppImage — x86_64 and arm64)
 
 Download the latest release from the [Releases page](https://github.com/aiulian25/cinesort/releases).
+Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`/`aarch64` — Raspberry Pi 5, ARM laptops).
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.2.6_amd64.deb
+sudo dpkg -i cinesort_1.3.0_amd64.deb      # arm64: cinesort_1.3.0_arm64.deb
 cinesort                    # or launch from your application menu
+```
+
+**Fedora / RHEL / openSUSE:**
+```bash
+sudo dnf install ./cinesort-1.3.0.x86_64.rpm   # arm64: cinesort-1.3.0.aarch64.rpm
+cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.2.6.AppImage
-./CineSort-1.2.6.AppImage
+chmod +x CineSort-1.3.0.AppImage           # arm64: CineSort-1.3.0-arm64.AppImage
+./CineSort-1.3.0.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
+
+> **arm64 note:** the bundled Python environment is compiled per build machine; on arm64 the app detects this on first launch and rebuilds a native environment automatically — **the first launch on arm64 needs an internet connection** (one-time, ~30 s).
 
 ---
 
@@ -179,8 +188,10 @@ Restart the app for changes to take effect when editing the file manually.
 | `PGID` | `1000` | Group ID for file permissions — run `id -g` on your host |
 | `TMDB_API_KEY` | *(bundled)* | Custom TMDb v3 API key |
 | `OMDB_API_KEY` | *(none)* | OMDb API key; OMDb is silently disabled without it |
+| `TMDB_LANGUAGE` | *(none — English)* | TMDb metadata language for titles/overviews used in filenames (ISO code, e.g. `de-DE`, `ro-RO`). Also settable in the app Settings. TVmaze/OMDb are English-only. |
 | `CINESORT_HOST` | `0.0.0.0` | Server bind address |
 | `CINESORT_PORT` | `8888` | Server port |
+| `CINESORT_DATA_DIR` | `/data` (Docker image) | Where history (`history.json`) and UI-saved API keys (`config/keys.env`) live. The image points it at the `/data` volume so both survive container recreation. Unset on desktop builds (per-user home paths are used). |
 | `CINESORT_BROWSE_ROOTS` | *(none)* | Extra folders the in-app browser may expose, in addition to `/mnt` and `/media` (`:`-separated, e.g. `/srv/tv:/srv/movies`). Only add paths you also mount. Shown as quick-access shortcuts. |
 | `CINESORT_ENABLE_GPU` | *(unset)* | Desktop only: set to `1` to re-enable GPU hardware acceleration (disabled by default on Linux to avoid black-window issues) |
 
@@ -475,6 +486,20 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## 📦 Changelog
+
+### v1.3.0
+- **Complete UI redesign** — flat, modern interface (glassmorphism and animated backgrounds removed): app bar with logo tile, options card with friendly template tokens (`{name}`, `{year}`, `{title}`, `{quality}` — old short tokens still work), footer action bar with live "N of M files ready", All/Matched/Unmatched view filter, and per-row status icons. Themes reduced to **Dark** and **Light**.
+- **Music renaming** — audio files (`.mp3`, `.flac`, …) now scan, match against **MusicBrainz** (keyless, rate-limit-respecting), and rename with the `{artist}/{album}/{track} - {title}` template. New Music source + preset.
+- **Manual metadata search** — right-click any result row → *Search metadata…* to fix a wrong/failed match by title, year, or exact IMDb ID; series picks re-match the whole group.
+- **Air-date matching** — daily shows named `Show.2024.03.05.mkv` now match the episode that aired that day (previously never matched).
+- **Move + Keep Link action** — moves the file and leaves a symlink behind (seedbox-friendly); the action list is now served by the backend so it can't drift from the UI.
+- **Smarter undo** — copy/hardlink/symlink operations are now undoable (destination removed, data-loss guarded), moves undo across filesystems, and History groups each Rename click into a batch with **Undo all**; "Show all history" reveals the full retained log.
+- **Docker persistence** — rename history *and* keys/language saved from Settings now live on the `/data` volume and survive container updates (`CINESORT_DATA_DIR`).
+- **Honest failures** — every unmatched row explains *why* (source error incl. invalid API key, no results, orphan subtitle, undetectable name); API keys are redacted from all error output.
+- **Real match progress** — the status bar shows "Matching group 3/7: The Wire (25 files)…" with a filling bar instead of a fake timer.
+- **TMDb metadata language** — new Settings field / `TMDB_LANGUAGE` env for localized titles in filenames (e.g. `de-DE`, `ro-RO`).
+- **New packages** — `.rpm` (Fedora/RHEL/openSUSE) and **arm64** builds of deb/rpm/AppImage; packages now declare the `python3` dependency and the installer's Python detection is future-proof (works with Python 3.14+).
+- **Performance/stability** — folder scans no longer block the server (a slow NAS scan froze every request); browse-dialog folder clicks navigate instead of silently selecting entire trees; "Include subfolders" is honored for browse selections.
 
 ### v1.2.6
 - **Multi-arch Docker image** — `aiulian25/cinesort` is now published as a `linux/amd64` + `linux/arm64` manifest, so Synology/ARM users can pull and run it directly (no local build, no `--platform`).

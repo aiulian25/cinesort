@@ -54,10 +54,21 @@ class TMDbClient:
         # Priority: 1) Provided key, 2) Environment variable, 3) None (disabled)
         self.api_key = api_key or os.getenv("TMDB_API_KEY", "")
         self.enabled = bool(self.api_key)
-        
+        # Metadata language (ISO code like "de-DE"; empty = TMDb default,
+        # en-US). Set as a CLIENT-level param so every request — search,
+        # season fetch, details — is localized from one place; httpx merges
+        # client params into each request automatically.
+        self.language = os.getenv("TMDB_LANGUAGE", "").strip()
+
+        base_params: dict = {}
+        if self.api_key:
+            base_params["api_key"] = self.api_key
+        if self.language:
+            base_params["language"] = self.language
+
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
-            params={"api_key": self.api_key} if self.api_key else {},
+            params=base_params,
             timeout=15.0,
             headers={"Accept": "application/json"},
         )

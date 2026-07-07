@@ -116,6 +116,7 @@ METRIC_LABELS = {
     "seq": "Word sequence",
     "sub": "Substring",
     "year": "Year",
+    "date": "Air date",
 }
 
 
@@ -130,6 +131,8 @@ def _score_components(
     meta_episode: int = 0,
     meta_absolute: int = 0,
     meta_year: Optional[int] = None,
+    file_date: Optional[str] = None,
+    meta_air_date: Optional[str] = None,
 ) -> list[tuple[str, float, float]]:
     """Compute the individual (metric, value, weight) tuples that make up a
     cascade score. Shared by cascade_score() and cascade_breakdown() so the
@@ -163,6 +166,12 @@ def _score_components(
     ym = year_match(file_year, meta_year)
     if ym != 0:
         scores.append(("year", ym, 1.0))
+
+    # 7. Air-date match (daily shows: filename date vs. episode air date).
+    # Exact equality only — both sides are already normalized to YYYY-MM-DD
+    # (detector DATE_PATTERN and the TMDb/TVmaze clients).
+    if file_date and meta_air_date and file_date == meta_air_date:
+        scores.append(("date", 1.0, 3.0))
 
     return scores
 
@@ -207,12 +216,15 @@ def cascade_breakdown(
     meta_episode: int = 0,
     meta_absolute: int = 0,
     meta_year: Optional[int] = None,
+    file_date: Optional[str] = None,
+    meta_air_date: Optional[str] = None,
 ) -> dict:
     """Same computation as cascade_score(), but also returns the per-metric
     contributions so the UI can explain *why* a match was chosen."""
     scores = _score_components(
         file_name, file_season, file_episode, file_absolute, file_year,
         meta_name, meta_season, meta_episode, meta_absolute, meta_year,
+        file_date=file_date, meta_air_date=meta_air_date,
     )
     return {
         "score": round(_aggregate(scores), 3),

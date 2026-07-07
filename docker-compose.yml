@@ -18,6 +18,11 @@ services:
       # Free tier: 1,000 requests/day. Get yours at https://www.omdbapi.com/apikey.aspx
       # Without this key the OMDb source is silently disabled.
       # - OMDB_API_KEY=your_omdb_api_key_here
+
+      # Optional: TMDb metadata language for the titles/overviews used in
+      # filenames (ISO code, e.g. de-DE, ro-RO). Empty/unset = English.
+      # TVmaze and OMDb are English-only. Can also be set in the app Settings.
+      # - TMDB_LANGUAGE=de-DE
       
       # Server configuration (usually no need to change these)
       - CINESORT_HOST=0.0.0.0
@@ -29,7 +34,10 @@ services:
       # - CINESORT_BROWSE_ROOTS=/media/movies:/media/tv:/media/downloads
     
     volumes:
-      # Persistent data (history, config)
+      # Persistent data: rename/undo history AND API keys saved from the
+      # Settings UI (the image sets CINESORT_DATA_DIR=/data). Both survive
+      # container recreation and image upgrades. Env vars above still take
+      # precedence over UI-saved keys.
       - cinesort-data:/data
       
       # Media directories - CHANGE THESE to match your system!

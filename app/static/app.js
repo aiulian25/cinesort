@@ -68,10 +68,82 @@ const keyBanner        = $id("key-banner");
 const bannerOpenSettings = $id("banner-open-settings");
 const bannerDismiss    = $id("banner-dismiss");
 
+const btnReview        = $id("btn-review");
+const footerHintAction = $id("footer-hint-action");
+const footerReady      = $id("footer-ready");
+const statHigh         = $id("stat-high");
+const statReview       = $id("stat-review");
+
+/* View filter for the dual pane (All / Matched / Unmatched).
+   Filters what is VISIBLE only — selection (checkboxes) decides what renames. */
+let viewFilter = "all";
+function rowHiddenCls(i) {
+    if (viewFilter === "all") return "";
+    const matched = !!(matchResults[i] && matchResults[i].matched);
+    return (viewFilter === "matched") === matched ? "" : " row-hidden";
+}
+
+/* Footer action bar: live "N of M files ready", Rename label, Review button. */
+function updateFooter() {
+    const total = scannedFiles.length;
+    let ready = 0, review = 0, hasMatch = false;
+    for (let i = 0; i < scannedFiles.length; i++) {
+        const m = matchResults[i];
+        if (m && m.matched) {
+            hasMatch = true;
+            if (selectedSet.has(i)) ready++;
+            if (!m.manual && m.score < 0.6) review++;
+        }
+    }
+    btnRename.disabled = ready === 0;
+    const label = btnRename.querySelector(".btn-label");
+    if (label) label.textContent = ready > 0 ? `Rename ${ready} file${ready === 1 ? "" : "s"}` : "Rename";
+    if (btnReview) {
+        btnReview.classList.toggle("hidden", review === 0);
+        btnReview.textContent = `Review ${review} match${review === 1 ? "" : "es"}`;
+    }
+    if (footerReady) {
+        footerReady.textContent = hasMatch
+            ? `${ready} of ${total} files ready.`
+            : (total > 0 ? `${total} file${total === 1 ? "" : "s"} scanned.` : "");
+    }
+    if (statHigh && statReview) {
+        const high = matchResults.filter(r => r && r.matched && (r.manual || r.score >= 0.6)).length;
+        statHigh.classList.toggle("hidden", high === 0);
+        statHigh.textContent = `${high} high`;
+        statReview.classList.toggle("hidden", review === 0);
+        statReview.textContent = `${review} review`;
+    }
+}
+
+/* Jump to the first match that needs review */
+btnReview?.addEventListener("click", () => {
+    for (let i = 0; i < matchResults.length; i++) {
+        const m = matchResults[i];
+        if (m && m.matched && !m.manual && m.score < 0.6) {
+            focusRow(i);
+            rightList.querySelector(`.row-item[data-idx="${i}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+            break;
+        }
+    }
+});
+
+/* Segmented view filter (left pane header) */
+document.querySelectorAll("#view-filter .seg-btn").forEach(b => {
+    b.addEventListener("click", () => {
+        viewFilter = b.dataset.filter;
+        document.querySelectorAll("#view-filter .seg-btn").forEach(x => x.classList.toggle("on", x === b));
+        renderLeft();
+        renderRight();
+    });
+});
+
 /* ─── First-run key check ─────────────────────────────────── */
+let appSettings = null;   // cached /api/settings (tmdb_enabled, omdb_enabled, …)
 (async function checkKeysOnStartup() {
     try {
         const s = await api("/api/settings");
+        appSettings = s;
         if (!s.tmdb_enabled) {
             keyBanner.classList.remove("hidden");
         }
@@ -482,34 +554,24 @@ function esc(s) {
     return d.innerHTML;
 }
 
-/* ─── Action hint banner ──────────────────────────────────── */
+/* ─── Action hint (footer bar) ────────────────────────────── */
+/* Fallback hints — overwritten by the server's copy from GET /api/actions
+   (initActions), so backend and UI text can't drift. */
 const ACTION_HINTS = {
-    rename:   "Rename (in-place): only the filename changes — files stay in their current folder. Works on NAS/SMB. No new folders are created.",
-    test:     "Test (Dry Run): nothing is changed on disk. Preview results only.",
-    move:     "Move: files are moved to a new path built from the template. Source file is deleted. New folders are created as needed.",
-    copy:     "Copy: a renamed copy is placed in the new path. Original file is kept.",
-    hardlink: "Hard Link: a directory entry that shares the same data blocks. Both names refer to the same file. Same filesystem required.",
-    symlink:  "Symlink: a symbolic link placed at the new path pointing back to the original. Not supported on SMB/CIFS or FAT/exFAT.",
+    rename:   "Rename in place — files stay in their current folders.",
+    test:     "Dry run — nothing changes on disk.",
+    move:     "Move relocates files into new folders — they leave this location.",
+    keeplink: "Moves the file and leaves a symlink at the old path — torrents keep seeding. Not for SMB/FAT.",
+    copy:     "Copy keeps originals and creates renamed copies.",
+    hardlink: "Hard link — same file, second name. Same filesystem only.",
+    symlink:  "Symlink points back to the original. Not for SMB/FAT.",
 };
 
-const elActionHint = (() => {
-    const el = document.createElement("div");
-    el.id = "action-hint";
-    el.className = "action-hint hidden";
-    // Insert below the scanbar, above the dual-pane
-    const statusBar = $id("status-bar");
-    statusBar.parentNode.insertBefore(el, statusBar.nextSibling);
-    return el;
-})();
-
 function updateActionHint() {
+    if (!footerHintAction) return;
     const hint = ACTION_HINTS[elAction.value];
-    if (hint) {
-        elActionHint.textContent = hint;
-        elActionHint.className = "action-hint action-hint-" + elAction.value;
-    } else {
-        elActionHint.className = "action-hint hidden";
-    }
+    footerHintAction.textContent = hint || "";
+    footerHintAction.className = "action-hint-text action-hint-" + elAction.value;
 }
 
 elAction.addEventListener("change", () => {
@@ -525,7 +587,9 @@ elSource.addEventListener("change", persistPrefs);
    Electron renderer and a Docker browser tab, so one implementation covers all
    targets with no file-permission or config-path differences. */
 const PREFS_KEY = "cinesort.prefs.v1";
-const VALID_THEMES = ["dark", "light", "aurora"];
+// "aurora" was removed in the flat-UI redesign; applyTheme() maps any
+// persisted unknown theme (incl. aurora) back to "dark".
+const VALID_THEMES = ["dark", "light"];
 
 function currentTheme() {
     return document.documentElement.getAttribute("data-theme") || "dark";
@@ -566,6 +630,31 @@ restorePrefs();
 
 updateActionHint(); // run once on load (after prefs restore so it reflects the saved action)
 
+/* Rebuild the Action dropdown from the backend (GET /api/actions) so the
+   option list always mirrors the RenameAction enum — the hardcoded HTML list
+   is only a fallback for offline/startup races. Runs after restorePrefs(),
+   preserving the user's saved action across the rebuild. */
+(async function initActions() {
+    let actions;
+    try {
+        actions = await api("/api/actions");
+    } catch { return; }   // backend unreachable — keep the static fallback list
+    if (!Array.isArray(actions) || actions.length === 0) return;
+
+    const saved = elAction.value;
+    elAction.innerHTML = "";
+    for (const a of actions) {
+        if (!a || typeof a.value !== "string") continue;
+        const o = document.createElement("option");
+        o.value = a.value;
+        o.textContent = a.label || a.value;
+        elAction.appendChild(o);
+        if (a.hint) ACTION_HINTS[a.value] = a.hint;
+    }
+    if ([...elAction.options].some(o => o.value === saved)) elAction.value = saved;
+    updateActionHint();
+})();
+
 
 elScanPath.addEventListener("keydown", e => { if (e.key === "Enter") doScan(); });
 // The toolbar Scan button previously had no handler — clicking it did nothing
@@ -593,7 +682,8 @@ async function scanPaths(paths) {
     try {
         const data = await api("/api/scan-batch", {
             method: "POST",
-            body: JSON.stringify({ paths }),
+            // Honor the "Include subfolders" toggle for folder selections too.
+            body: JSON.stringify({ paths, recursive: elRecursive.checked }),
         });
         scannedFiles = data.files;
         matchResults = [];
@@ -671,6 +761,8 @@ async function getBrowseRoots() {
 
 async function showBrowseDialog(startPath) {
     modalTitle.textContent = "Browse Folders";
+    // Wide, height-aware modal variant; removed again by R.closeModal().
+    modalOverlay.classList.add("modal-wide");
 
     const rootsInfo = await getBrowseRoots();
     const shortcuts = rootsInfo.shortcuts || [];
@@ -787,7 +879,7 @@ async function showBrowseDialog(startPath) {
             }
             renderList();
         });
-        $id("browse-cancel").addEventListener("click", () => modalOverlay.classList.add("hidden"));
+        $id("browse-cancel").addEventListener("click", () => R.closeModal());
         $id("browse-scan").addEventListener("click", doScanSelection);
 
         // Keyboard navigation — attached once per chrome render (the list element
@@ -870,17 +962,17 @@ async function showBrowseDialog(startPath) {
             });
         });
 
-        // Row click (toggle dir checkbox) / double-click (navigate)
+        // Row click: directories NAVIGATE (like every file manager); selecting a
+        // directory requires an explicit click on its checkbox. The old behavior
+        // (click = toggle checkbox) silently selected huge folders while browsing,
+        // and "Scan N Selected" then crawled entire NAS trees the user never
+        // meant to include. Files still toggle on click.
         listEl.querySelectorAll(".browser-item").forEach(el => {
             el.addEventListener("click", e => {
                 if (e.target.tagName === "INPUT") return;
-                if (el.dataset.isParent === "true") { loadPath(el.dataset.path); return; }
+                if (el.dataset.isDir === "true") { loadPath(el.dataset.path); return; }
                 const cb = el.querySelector('input[type="checkbox"]');
                 if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event("change")); }
-            });
-            el.addEventListener("dblclick", e => {
-                if (e.target.matches('input[type="checkbox"]')) return;
-                if (el.dataset.isDir === "true") loadPath(el.dataset.path);
             });
         });
 
@@ -907,7 +999,7 @@ async function showBrowseDialog(startPath) {
     }
 
     async function doScanSelection() {
-        modalOverlay.classList.add("hidden");
+        R.closeModal();
         if (selectedPaths.size > 0) {
             await scanPaths(Array.from(selectedPaths));
         } else {
@@ -954,6 +1046,24 @@ async function doScan() {
 /* ─── Match ───────────────────────────────────────────────── */
 btnMatch.addEventListener("click", doMatch);
 
+/* Poll the backend's live match snapshot and render determinate progress:
+   "Matching group 3/7: The Wire (25 files)…" with the bar filling. Returns
+   the interval id — callers clearInterval() it when the match settles. Poll
+   failures are non-fatal (the indeterminate bar simply keeps animating). */
+function startMatchProgressTicker() {
+    return setInterval(async () => {
+        try {
+            const p = await api("/api/match-progress");
+            if (p.active && p.total > 0) {
+                const files = p.files ? ` (${p.files} file${p.files === 1 ? "" : "s"})` : "";
+                statusText.textContent = `Matching group ${p.current}/${p.total}: ${p.group}${files}…`;
+                progressFill.classList.remove("loading");
+                progressFill.style.width = Math.round(100 * p.current / p.total) + "%";
+            }
+        } catch { /* transient poll failure — keep last rendered state */ }
+    }, 1000);
+}
+
 async function doMatch() {
     if (scannedFiles.length === 0) return;
 
@@ -961,18 +1071,12 @@ async function doMatch() {
     if (filesToMatch.length === 0) return;
 
     // /api/match is a single request (kept that way to preserve cross-file
-    // grouping + subtitle pairing + conflict detection — see IMPROVEMENTS §4.5).
-    // Since we can't show determinate per-file progress without server-side
-    // streaming, surface an elapsed-time ticker so a long lookup never looks
-    // frozen behind the indeterminate bar.
+    // grouping + subtitle pairing + conflict detection). Real progress comes
+    // from polling GET /api/match-progress once a second — the backend updates
+    // a snapshot as it works through each detected group.
     const src = elSource.value.toUpperCase();
-    const t0 = Date.now();
     status(`Matching ${filesToMatch.length} file(s) against ${src}…`);
-    const ticker = setInterval(() => {
-        // Update only the text so the indeterminate bar's animation isn't reset.
-        const secs = Math.round((Date.now() - t0) / 1000);
-        statusText.textContent = `Matching ${filesToMatch.length} file(s) against ${src}… ${secs}s`;
-    }, 1000);
+    const ticker = startMatchProgressTicker();
     btnMatch.disabled = true;
 
     try {
@@ -1008,16 +1112,23 @@ async function doMatch() {
         renderLeft();   // reflect any rows the gate deselected
         renderRight();
         renderGutter();
-        btnRename.disabled = !matchResults.some(r => r && r.matched);
+        updateFooter();
         const matched = matchResults.filter(r => r && r.matched).length;
 
-        // Show conflicts if any
+        // Status line: conflicts and/or source errors, both truthful at once.
+        const suffix = [];
         if (data.conflicts && data.conflicts.length > 0) {
             showConflictsDialog(data.conflicts);
-            statusDone(`Matched ${matched} of ${filesToMatch.length} file(s) — ${data.conflicts.length} conflict(s) found`);
-        } else {
-            statusDone(`Matched ${matched} of ${filesToMatch.length} file(s)`);
+            suffix.push(`${data.conflicts.length} conflict(s) found`);
         }
+        const srcErrs = Object.entries(data.source_errors || {});
+        if (srcErrs.length) {
+            suffix.push(srcErrs.map(([s, e]) => `${s.toUpperCase()} error: ${e}`).join("; "));
+            // A 401 means the key is invalid/revoked — resurface the key banner
+            // at the exact moment it matters.
+            if (srcErrs.some(([, e]) => e.includes("401"))) keyBanner.classList.remove("hidden");
+        }
+        statusDone(`Matched ${matched} of ${filesToMatch.length} file(s)${suffix.length ? " — " + suffix.join(" · ") : ""}`);
     } catch (err) {
         statusDone("Match failed: " + err.message);
     } finally {
@@ -1129,15 +1240,15 @@ async function showSettings() {
             <div class="theme-picker" id="theme-picker">
                 ${swatch("dark", "Dark")}
                 ${swatch("light", "Light")}
-                ${swatch("aurora", "Aurora")}
             </div>
         </div>
 
         <p style="color:var(--txt3);font-size:11px;margin:16px 0;line-height:1.6">
             Keys are saved to <code class="settings-path">${esc(cfgFile)}</code> and take
-            effect immediately — no restart needed.
-            Docker users: set them as environment variables in
-            <code>docker-compose.yml</code> instead.
+            effect immediately — no restart needed. In Docker this lives on the
+            <code>/data</code> volume, so keys saved here persist across container
+            updates; environment variables in <code>docker-compose.yml</code>
+            always take precedence.
         </p>
 
         <div class="settings-row">
@@ -1174,6 +1285,18 @@ async function showSettings() {
             </div>
         </div>
 
+        <div class="settings-row">
+            <div class="settings-label"><span>Metadata language</span></div>
+            <p class="settings-hint">
+                TMDb language for the titles and overviews used in filenames
+                (e.g. <code>de-DE</code>, <code>ro-RO</code>, or just <code>de</code>).
+                Empty = English. TVmaze and OMDb are English-only.
+            </p>
+            <input type="text" id="set-tmdb-lang" class="glass-input mono" style="width:130px"
+                   value="${esc(current.tmdb_language || "")}" placeholder="en-US"
+                   maxlength="5" autocomplete="off" spellcheck="false">
+        </div>
+
         <div style="display:flex;gap:8px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
             <button class="glass-btn" onclick="R.closeModal()" style="flex:1">Cancel</button>
             <button class="glass-btn btn-scan" id="settings-save" style="flex:2">Save &amp; Apply</button>
@@ -1196,6 +1319,7 @@ async function showSettings() {
     $id("settings-save").addEventListener("click", async () => {
         const tmdbVal = $id("set-tmdb").value.trim();
         const omdbVal = $id("set-omdb").value.trim();
+        const langVal = $id("set-tmdb-lang").value.trim();
         const msg     = $id("settings-msg");
 
         // Basic client-side length check (mirrors server-side validation)
@@ -1206,6 +1330,11 @@ async function showSettings() {
                 return;
             }
         }
+        if (langVal && !/^[a-z]{2}(-[A-Z]{2})?$/.test(langVal)) {
+            msg.style.color = "var(--red)";
+            msg.textContent = "Language: use an ISO code like de or de-DE (empty = English).";
+            return;
+        }
 
         const saveBtn = $id("settings-save");
         saveBtn.disabled = true;
@@ -1215,7 +1344,7 @@ async function showSettings() {
         try {
             const result = await api("/api/settings", {
                 method: "POST",
-                body: JSON.stringify({ tmdb_key: tmdbVal, omdb_key: omdbVal }),
+                body: JSON.stringify({ tmdb_key: tmdbVal, omdb_key: omdbVal, tmdb_language: langVal }),
             });
             msg.style.color = "var(--green)";
             msg.textContent = "✓ Saved. Keys are active for this session.";
@@ -1236,56 +1365,93 @@ async function showSettings() {
 /* ─── History ─────────────────────────────────────────────── */
 btnHistory.addEventListener("click", showHistory);
 
-async function showHistory() {
+async function showHistory(limit) {
+    // Called from a click listener too, where the arg is an Event — guard.
+    limit = typeof limit === "number" ? limit : 50;
     modalTitle.textContent = "Rename History";
     modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:var(--txt3)">Loading...</div>`;
     modalOverlay.classList.remove("hidden");
-    
+
     try {
-        const data = await api("/api/history");
+        const data = await api(`/api/history?limit=${limit}`);
         const entries = data.history || [];
-        
+
         if (entries.length === 0) {
             modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:var(--txt3)">No history yet</div>`;
             return;
         }
-        
-        let html = `<div style="max-height:400px;overflow-y:auto;display:flex;flex-direction:column;gap:8px">`;
-        
-        for (const e of entries) {
+
+        const rowHtml = (e) => {
             const time = new Date(e.timestamp).toLocaleString();
-            const actionColor = e.action === "move" ? "#6ee7b7" : e.action === "copy" ? "#93c5fd" : "#fde047";
+            const actionColor = e.action === "move" ? "var(--green)" : e.action === "copy" ? "var(--info)" : "var(--amber)";
             const statusIcon = e.success ? "✓" : "✗";
-            const statusColor = e.success ? "#6ee7b7" : "#f87171";
-            
-            html += `<div style="padding:10px;background:var(--glass-hover);border:1px solid var(--border);border-radius:6px">`;
-            html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">`;
-            html += `<div style="display:flex;gap:8px;align-items:center">`;
-            html += `<span style="color:${statusColor};font-weight:600">${statusIcon}</span>`;
-            html += `<span style="color:${actionColor};font-weight:500;font-size:11px;text-transform:uppercase">${e.action}</span>`;
-            html += `<span style="color:var(--txt3);font-size:10px">${time}</span>`;
-            html += `</div>`;
+            const statusColor = e.success ? "var(--green)" : "var(--red)";
+            let h = `<div style="padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px">`;
+            h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">`;
+            h += `<div style="display:flex;gap:8px;align-items:center">`;
+            h += `<span style="color:${statusColor};font-weight:600">${statusIcon}</span>`;
+            h += `<span style="color:${actionColor};font-weight:500;font-size:11px;text-transform:uppercase">${e.action}</span>`;
+            h += `<span style="color:var(--txt3);font-size:10px">${time}</span>`;
+            h += `</div>`;
             if (e.success && e.action !== "test" && e.action !== "undo") {
-                html += `<button class="glass-btn" onclick="R.undoOperation('${e.id}')" style="padding:3px 10px;font-size:10px">Undo</button>`;
+                h += `<button class="glass-btn" onclick="R.undoOperation('${e.id}')" style="padding:3px 10px;font-size:10px">Undo</button>`;
             }
-            html += `</div>`;
-            html += `<div style="font-size:10px;color:var(--txt3);line-height:1.6">`;
-            html += `<div>From: ${esc(Path.basename(e.original))}</div>`;
-            html += `<div>To: ${esc(Path.basename(e.destination))}</div>`;
-            if (e.error) html += `<div style="color:#f87171">Error: ${esc(e.error)}</div>`;
-            html += `</div>`;
-            html += `</div>`;
+            h += `</div>`;
+            h += `<div style="font-size:10px;color:var(--txt3);line-height:1.6">`;
+            h += `<div>From: ${esc(Path.basename(e.original))}</div>`;
+            h += `<div>To: ${esc(Path.basename(e.destination))}</div>`;
+            if (e.error) h += `<div style="color:var(--red)">Error: ${esc(e.error)}</div>`;
+            h += `</div>`;
+            h += `</div>`;
+            return h;
+        };
+
+        // Group CONSECUTIVE entries sharing a batch_id (one Rename click).
+        const groups = [];
+        for (const e of entries) {
+            const last = groups[groups.length - 1];
+            if (e.batch_id && last && last.batchId === e.batch_id) {
+                last.entries.push(e);
+            } else {
+                groups.push({ batchId: e.batch_id || null, entries: [e] });
+            }
         }
-        
+
+        let html = `<div style="max-height:400px;overflow-y:auto;display:flex;flex-direction:column;gap:8px">`;
+        for (const g of groups) {
+            if (g.batchId && g.entries.length >= 2) {
+                const first = g.entries[0];
+                const undoable = g.entries.filter(
+                    e => e.success && e.action !== "test" && e.action !== "undo").length;
+                html += `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px">`;
+                html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:0 2px">`;
+                html += `<div style="display:flex;gap:8px;align-items:center">`;
+                html += `<span style="color:var(--txt);font-weight:600;font-size:11.5px">Batch — ${g.entries.length} files</span>`;
+                html += `<span style="color:var(--txt3);font-size:10px">${new Date(first.timestamp).toLocaleString()}</span>`;
+                html += `</div>`;
+                if (undoable > 0) {
+                    html += `<button class="glass-btn" onclick="R.undoBatch('${esc(g.batchId)}')" style="padding:3px 10px;font-size:10px">Undo all (${undoable})</button>`;
+                }
+                html += `</div>`;
+                html += g.entries.map(rowHtml).join("");
+                html += `</div>`;
+            } else {
+                html += g.entries.map(rowHtml).join("");
+            }
+        }
         html += `</div>`;
+
         html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px">`;
+        if (entries.length === limit && limit < 1000) {
+            html += `<button class="glass-btn" onclick="R.showAllHistory()" style="flex:1;font-size:11px">Show all history</button>`;
+        }
         html += `<button class="glass-btn" onclick="R.clearHistory()" style="flex:1;font-size:11px">Clear History</button>`;
         html += `<button class="glass-btn" onclick="R.closeModal()" style="flex:1;font-size:11px">Close</button>`;
         html += `</div>`;
-        
+
         modalBody.innerHTML = html;
     } catch (err) {
-        modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:#f87171">Failed to load history: ${esc(err.message)}</div>`;
+        modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:var(--red)">Failed to load history: ${esc(err.message)}</div>`;
     }
 }
 
@@ -1316,18 +1482,17 @@ function renderLeft() {
     for (let i = 0; i < scannedFiles.length; i++) {
         const f = scannedFiles[i];
         const checked = selectedSet.has(i) ? "checked" : "";
-        const typeTag = f.media_type === "series"
-            ? '<span class="tag series">TV</span>'
-            : f.media_type === "movie"
-            ? '<span class="tag movie">Film</span>'
-            : '<span class="tag">?</span>';
-        const sxeTag = f.season != null
-            ? `<span class="tag sxe">S${String(f.season).padStart(2,"0")}E${String(f.episode).padStart(2,"0")}</span>`
-            : "";
-        const sizeTag = f.size ? `<span class="tag">${fmt(f.size)}</span>` : "";
-        const vfTag = f.video_format ? `<span class="tag">${f.video_format}</span>` : "";
+        const dimCls = selectedSet.has(i) ? "" : " row-dim";
+        const sizeTag = f.size ? `<span class="tag tag-size" title="File size">${fmt(f.size)}</span>` : "";
+        const musicTag = f.media_type === "music" ? `<span class="tag music" title="Audio file — use the MusicBrainz source">♪</span>` : "";
+        // Detection details (type, SxE, quality) live in the row tooltip and
+        // the "View metadata" dialog; rows stay clean: checkbox + name + size.
+        const tip = [f.path,
+                     f.media_type === "series" ? "TV" : f.media_type === "movie" ? "Film" : f.media_type === "music" ? "Music" : "",
+                     f.season != null ? `S${String(f.season).padStart(2,"0")}E${String(f.episode).padStart(2,"0")}` : "",
+                     f.video_format || ""].filter(Boolean).join("  ·  ");
 
-        html += `<div class="row-item" data-idx="${i}" draggable="true"
+        html += `<div class="row-item${rowHiddenCls(i)}${dimCls}" data-idx="${i}" draggable="true"
                       role="option" tabindex="-1" aria-selected="${selectedSet.has(i)}"
                       aria-label="${esc(f.filename)}"
                       onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
@@ -1337,9 +1502,8 @@ function renderLeft() {
                       ondrop="R.drop(event, ${i}, 'left')"
                       ondragend="R.dragEnd(event)">
             <div class="row-cb"><input type="checkbox" ${checked} data-idx="${i}" aria-label="Select ${esc(f.filename)}"></div>
-            <div class="row-icon">${fileIcon(f.media_type)}</div>
-            <span class="row-text original" title="${esc(f.path)}">${esc(f.filename)}</span>
-            <div class="row-tags">${typeTag}${sxeTag}${vfTag}${sizeTag}</div>
+            <span class="row-text original" title="${esc(tip)}">${esc(f.filename)}</span>
+            <div class="row-tags">${musicTag}${sizeTag}</div>
         </div>`;
     }
     leftList.innerHTML = html;
@@ -1350,6 +1514,8 @@ function renderLeft() {
             const idx = parseInt(e.target.dataset.idx);
             if (e.target.checked) selectedSet.add(idx);
             else selectedSet.delete(idx);
+            e.target.closest(".row-item")?.classList.toggle("row-dim", !e.target.checked);
+            updateFooter();
         });
     });
 
@@ -1365,9 +1531,14 @@ function renderLeft() {
     if (focusedIdx !== null && focusedIdx < scannedFiles.length) {
         leftList.querySelector(`.row-item[data-idx="${focusedIdx}"]`)?.classList.add("row-focused");
     }
+
+    updateFooter();
 }
 
 /* ─── Render Right Pane (New Names) ───────────────────────── */
+const ICON_OK   = `<svg class="ric ok" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-label="High confidence"><path d="M20 6 9 17l-5-5"/></svg>`;
+const ICON_REV  = `<svg class="ric rev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-label="Needs review"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>`;
+const ICON_NONE = `<svg class="ric none" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-label="No match"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>`;
 const PENCIL_SVG = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
 
 function renderRight() {
@@ -1390,7 +1561,7 @@ function renderRight() {
 
         /* ── Not yet attempted (scan done, match not run) ── */
         if (!m) {
-            html += `<div class="row-item" data-idx="${i}"
+            html += `<div class="row-item${rowHiddenCls(i)}" data-idx="${i}"
                           onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
                           oncontextmenu="R.showContextMenu(event, ${i}, 'right')"
                           ondblclick="R.startInlineEdit(${i})">
@@ -1405,44 +1576,29 @@ function renderRight() {
         /* ── Auto-matched or manually named ── */
         if (m.matched) {
             const isManual = !!m.manual;
-            const poster = (!isManual && m.metadata?.poster)
-                ? `<img src="${esc(m.metadata.poster)}" alt="">`
-                : fileIcon(isManual ? "edit" : "matched");
-
-            let metaLine = "";
-            if (!isManual && m.metadata?.show) {
-                const title = m.metadata.title || "";
-                const year = scannedFiles[i]?.year || "";
-                metaLine = `<div class="meta-detail" title="${esc(title)}">`;
-                metaLine += `<span class="meta-show">${esc(m.metadata.show)}</span>`;
-                if (year) metaLine += ` <span class="meta-year">(${year})</span>`;
-                metaLine += ` • <span class="meta-ep">S${String(m.metadata.season||0).padStart(2,"0")}E${String(m.metadata.episode||0).padStart(2,"0")}</span>`;
-                if (title) metaLine += ` • <span class="meta-title">${esc(title)}</span>`;
-                metaLine += `</div>`;
-            } else if (!isManual && m.metadata?.title) {
-                const year = m.metadata.year || "";
-                metaLine = `<div class="meta-detail"><span class="meta-show">${esc(m.metadata.title)}</span>`;
-                if (year) metaLine += ` <span class="meta-year">(${year})</span>`;
-                metaLine += `</div>`;
-            }
+            // Status icon replaces the old %-score tag: check = high confidence
+            // or manual, triangle = needs review. Exact score + per-metric
+            // breakdown remain in the right-click "View metadata" dialog.
+            const isHigh = isManual || m.score >= 0.6;
+            const icon = isHigh ? ICON_OK : ICON_REV;
+            const manualTag = isManual ? `<span class="tag manual">manual</span>` : "";
 
             // For rename (in-place) show only the filename, not the full template path
             const displayName = elAction.value === "rename"
                 ? (m.new_name || "")
                 : (m.preview || m.new_name || "");
 
-            // Three-tier confidence: high ≥0.6, review ≥0.4, low <0.4.
-            // Low-confidence matches are flagged "review" and were deselected
-            // by the confidence gate so they aren't renamed unless re-checked.
-            const scoreCls = m.score >= 0.6 ? "score-hi" : m.score >= LOW_CONFIDENCE ? "score-mid" : "score-lo";
-            const reviewTag = (!isManual && m.score < LOW_CONFIDENCE)
-                ? `<span class="tag score-review" title="Low confidence — review before renaming (not auto-selected)">review</span>`
-                : "";
-            const scoreTag = isManual
-                ? `<span class="tag manual">manual</span>`
-                : `${reviewTag}<span class="tag ${scoreCls}">${Math.round(m.score * 100)}%</span>`;
+            // Rich tooltip: full path + matched show/episode metadata
+            let tip = m.new_path || displayName;
+            if (!isManual && m.metadata?.show) {
+                tip += `\n${m.metadata.show} • S${String(m.metadata.season||0).padStart(2,"0")}E${String(m.metadata.episode||0).padStart(2,"0")}`;
+                if (m.metadata.title) tip += ` • ${m.metadata.title}`;
+            } else if (!isManual && m.metadata?.title) {
+                tip += `\n${m.metadata.title}${m.metadata.year ? " (" + m.metadata.year + ")" : ""}`;
+            }
+            tip += `\nConfidence: ${Math.round(m.score * 100)}%`;
 
-            html += `<div class="row-item" data-idx="${i}" draggable="true"
+            html += `<div class="row-item${rowHiddenCls(i)}" data-idx="${i}" draggable="true"
                           onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
                           oncontextmenu="R.showContextMenu(event, ${i}, 'right')"
                           ondragstart="R.dragStart(event, ${i}, 'right')"
@@ -1450,14 +1606,11 @@ function renderRight() {
                           ondrop="R.drop(event, ${i}, 'right')"
                           ondragend="R.dragEnd(event)"
                           ondblclick="R.startInlineEdit(${i})">
-                <div class="row-icon">${poster}</div>
-                <div style="flex:1;min-width:0;">
-                    <span class="row-text newname" title="${esc(displayName)}">${esc(displayName)}</span>
-                    ${metaLine}
-                </div>
+                ${icon}
+                <span class="row-text newname" title="${esc(tip)}">${esc(displayName)}</span>
                 <div class="row-tags">
+                    ${manualTag}
                     ${sizeTag}
-                    ${scoreTag}
                     <button class="row-edit-btn" title="Edit name (double-click or F2)"
                             onclick="event.stopPropagation();R.startInlineEdit(${i})">${PENCIL_SVG}</button>
                 </div>
@@ -1466,12 +1619,12 @@ function renderRight() {
         }
 
         /* ── Match attempted, failed → prominent edit CTA ── */
-        html += `<div class="row-item row-unmatched-cta" data-idx="${i}"
+        html += `<div class="row-item row-unmatched-cta${rowHiddenCls(i)}" data-idx="${i}"
                       onmouseenter="R.hoverRow(${i})" onmouseleave="R.unhoverRow(${i})"
                       oncontextmenu="R.showContextMenu(event, ${i}, 'right')"
                       ondblclick="R.startInlineEdit(${i})">
-            <div class="row-icon">${fileIcon("edit")}</div>
-            <span class="row-text unmatched">No match found</span>
+            ${ICON_NONE}
+            <span class="row-text unmatched" title="${esc(m.reason || "")}">${esc(m.reason || "No match — name manually")}</span>
             <div class="row-tags">${sizeTag}</div>
             <button class="row-edit-btn row-edit-btn-cta" title="Name this file manually"
                     onclick="event.stopPropagation();R.startInlineEdit(${i})">${PENCIL_SVG} Edit</button>
@@ -1491,10 +1644,16 @@ function renderRight() {
     if (focusedIdx !== null && focusedIdx < scannedFiles.length) {
         rightList.querySelector(`.row-item[data-idx="${focusedIdx}"]`)?.classList.add("row-focused");
     }
+
+    updateFooter();
 }
 
 /* ─── Render Gutter Arrows ────────────────────────────────── */
 function renderGutter() {
+    // The arrow gutter was removed in the flat-UI redesign (match state is
+    // shown per-row in the right pane). Kept as a guarded no-op because it is
+    // called from every render path.
+    if (!gutter) return;
     if (scannedFiles.length === 0) {
         gutter.innerHTML = "";
         return;
@@ -1546,6 +1705,7 @@ function showContextMenu(e, idx, pane) {
         }
     }
     if (pane === "right") {
+        html += `<div class="ctx-item" onclick="R.searchMetadata(${idx})">🔍 Search metadata…</div>`;
         html += `<div class="ctx-item" onclick="R.startInlineEdit(${idx});R.hideMenu()"><span>✏ Edit name manually</span><kbd>F2</kbd></div>`;
         if (m && m.matched && !m.manual) {
             html += `<div class="ctx-item" onclick="R.showMetadata(${idx})">ℹ️ View metadata</div>`;
@@ -1574,7 +1734,10 @@ window.R = {
     // Inline onclick handlers run in GLOBAL scope, where the IIFE-local
     // `modalOverlay` / `hideContextMenu` are not visible. Routing them through
     // the global `R` object is what makes Cancel/Close/Done buttons work.
-    closeModal() { modalOverlay.classList.add("hidden"); },
+    closeModal() {
+        modalOverlay.classList.add("hidden");
+        modalOverlay.classList.remove("modal-wide");   // reset the browser's wide variant
+    },
     hideMenu() { hideContextMenu(); },
     hoverRow(idx) {
         leftList.querySelector(`.row-item[data-idx="${idx}"]`)?.classList.add("peer-hover");
@@ -1646,7 +1809,7 @@ window.R = {
         matchResults[idx] = null;
         renderRight();
         renderGutter();
-        btnRename.disabled = !matchResults.some(r => r && r.matched);
+        updateFooter();
     },
     showMetadata(idx) {
         const m = matchResults[idx];
@@ -1680,6 +1843,9 @@ window.R = {
         html += `<code style="font-size:10px;color:var(--txt);display:block;margin-top:4px;word-break:break-all">${esc(m.new_path || "")}</code>`;
         html += `</div>`;
         
+        if (m.reason) {
+            html += `<div style="margin-top:12px;color:var(--amber);font-size:11px"><strong>Note:</strong> ${esc(m.reason)}</div>`;
+        }
         html += `<div style="margin-top:12px;color:var(--txt3);font-size:11px"><strong>Match score:</strong> ${Math.round(m.score * 100)}%`;
         if (m.score < LOW_CONFIDENCE) html += ` <span style="color:var(--amber)">(low — review)</span>`;
         html += `</div>`;
@@ -1711,6 +1877,173 @@ window.R = {
         modalOverlay.classList.remove("hidden");
     },
     
+    /* ─── Manual metadata search (wires the previously-dead /api/search) ── */
+    searchMetadata(idx) {
+        hideContextMenu();
+        const f = scannedFiles[idx];
+        if (!f) return;
+
+        modalTitle.textContent = "Search Metadata";
+        const isTv = f.media_type !== "movie";
+        const imdbRow = (appSettings && appSettings.omdb_enabled)
+            ? `<div style="display:flex;gap:6px;align-items:center;margin-top:8px">
+                   <input type="text" id="search-imdb" class="glass-input mono" style="flex:1"
+                          placeholder="…or exact IMDb ID (tt1234567)" spellcheck="false" maxlength="12">
+               </div>`
+            : "";
+
+        modalBody.innerHTML = `
+            <p style="color:var(--txt2);font-size:12px;margin-bottom:10px">
+                Search for the correct title, then pick a result to re-match
+                <code>${esc(f.filename)}</code>.
+            </p>
+            <div style="display:flex;gap:6px;align-items:center">
+                <input type="text" id="search-q" class="glass-input" style="flex:1"
+                       value="${esc(f.clean_name || "")}" spellcheck="false" placeholder="Title…">
+                <input type="text" id="search-year" class="glass-input" style="width:74px"
+                       value="${f.year || ""}" placeholder="Year" maxlength="4" inputmode="numeric">
+                <select id="search-type" class="glass-select" style="width:104px">
+                    <option value="tv" ${isTv ? "selected" : ""}>TV</option>
+                    <option value="movie" ${isTv ? "" : "selected"}>Movie</option>
+                </select>
+                <button class="glass-btn btn-primary" id="search-go">Search</button>
+            </div>
+            ${imdbRow}
+            <div id="search-results" style="margin-top:12px"></div>`;
+        modalOverlay.classList.remove("hidden");
+
+        const qEl = $id("search-q"), yEl = $id("search-year"),
+              tEl = $id("search-type"), out = $id("search-results"),
+              imdbEl = $id("search-imdb");
+
+        const run = async () => {
+            const q = qEl.value.trim();
+            const imdb = imdbEl ? imdbEl.value.trim() : "";
+            if (!q && !imdb) { qEl.focus(); return; }
+            out.innerHTML = `<div style="text-align:center;padding:14px;color:var(--txt3)"><span class="spinner"></span></div>`;
+
+            // The endpoint returns nothing for tvmaze+movie / omdb+tv — map
+            // those combos to TMDb so the toggle always does what it says.
+            const t = tEl.value;
+            let ds = elSource.value;
+            if (t === "movie" && ds === "tvmaze") ds = "tmdb";
+            if (t === "tv" && ds === "omdb") ds = "tmdb";
+
+            let url = `/api/search?q=${encodeURIComponent(q || "x")}&type=${t}&datasource=${ds}`
+                    + `&include_adult=${elIncludeAdult.checked}`;
+            const y = parseInt(yEl.value, 10);
+            if (y) url += `&year=${y}`;
+            if (imdb) url += `&imdb_id=${encodeURIComponent(imdb)}`;
+
+            let res;
+            try {
+                res = await api(url);
+            } catch (err) {
+                out.innerHTML = `<p class="browse-error">${esc(err.message)}</p>`;
+                return;
+            }
+            const items = res.results || [];
+            if (items.length === 0) {
+                out.innerHTML = `<p style="text-align:center;padding:14px;color:var(--txt3);font-size:12px">No results — adjust the title or year and try again.</p>`;
+                return;
+            }
+            // Stash candidates so Select handlers don't re-serialize into HTML.
+            window._searchCandidates = items;
+            let html = `<div class="candidate-list">`;
+            items.forEach((c, ci) => {
+                const year = c.year ? ` (${c.year})` : "";
+                const rating = c.rating ? ` ⭐ ${Number(c.rating).toFixed(1)}` : "";
+                const poster = c.poster
+                    ? `<img src="${esc(c.poster)}" style="width:40px;height:60px;object-fit:cover;border-radius:4px;">`
+                    : `<div style="width:40px;height:60px;background:var(--surface-2);border-radius:4px;"></div>`;
+                const overview = c.overview ? `<div style="font-size:10px;color:var(--txt3);margin-top:4px;line-height:1.4">${esc(c.overview)}</div>` : "";
+                html += `<div class="candidate-item">
+                    ${poster}
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:500;font-size:12px;color:var(--txt)">${esc(c.title)}${year}${rating}</div>
+                        ${overview}
+                    </div>
+                    <button class="glass-btn btn-primary" style="padding:4px 12px;font-size:11px"
+                            onclick="R.pickSearchResult(${idx}, ${ci})">Select</button>
+                </div>`;
+            });
+            html += `</div>`;
+            out.innerHTML = html;
+        };
+
+        $id("search-go").addEventListener("click", run);
+        [qEl, yEl, imdbEl].forEach(el => el && el.addEventListener("keydown", e => {
+            e.stopPropagation();   // keep Del/Ctrl+A off the panes behind the modal
+            if (e.key === "Enter") { e.preventDefault(); run(); }
+        }));
+        qEl.focus();
+        qEl.select();
+    },
+
+    /* Apply a picked search candidate. Series (tv): re-match the file's whole
+       clean_name group via the existing selected_show_id flow. Movie: build
+       the templated name client-side (no backend movie-id re-match exists)
+       and write it into matchResults like an auto-match. */
+    async pickSearchResult(idx, ci) {
+        const c = (window._searchCandidates || [])[ci];
+        const f = scannedFiles[idx];
+        if (!c || !f) return;
+        delete window._searchCandidates;
+
+        if (c.type === "tv") {
+            // Whole detection group — mirrors the backend's grouping key.
+            window._pendingMatchFiles = scannedFiles.filter(
+                x => x.clean_name === f.clean_name
+            );
+            await R.selectShow(c.id, c.title);
+            return;
+        }
+
+        // Movie: format via the same template engine the real rename uses.
+        R.closeModal();
+        let preview;
+        try {
+            const data = await api("/api/preview-template", {
+                method: "POST",
+                body: JSON.stringify({
+                    template: elTemplate.value,
+                    sample: { ...f, clean_name: c.title, year: c.year, title: c.title },
+                }),
+            });
+            preview = data.preview;
+        } catch (err) {
+            statusDone("Template failed: " + err.message);
+            return;
+        }
+        const dot = f.filename.lastIndexOf(".");
+        const ext = dot > 0 ? f.filename.slice(dot) : "";
+        // Sanitize each path segment the way build_new_path() does server-side.
+        const parts = preview.split("/").filter(Boolean).map(s =>
+            s.replace(/[<>:"\\|?*]/g, "").replace(/[\x00-\x1f]/g, "").replace(/\s+/g, " ").trim()
+        ).filter(Boolean);
+        if (parts.length === 0) { statusDone("Template produced an empty name"); return; }
+        const fileName = parts.pop() + ext;
+        const parentDir = f.path.lastIndexOf("/") > 0 ? f.path.slice(0, f.path.lastIndexOf("/")) : ".";
+        const newPath = [parentDir, ...parts, fileName].join("/");
+
+        matchResults[idx] = {
+            matched: true,
+            manual: false,
+            score: 1.0,
+            original: f.path,
+            new_name: fileName,
+            new_path: newPath,
+            preview: [...parts, fileName].join("/"),
+            metadata: { title: c.title, year: c.year, poster: c.poster },
+        };
+        selectedSet.add(idx);
+        renderLeft();
+        renderRight();
+        renderGutter();
+        updateFooter();
+        statusDone(`Matched manually: ${c.title}${c.year ? " (" + c.year + ")" : ""}`);
+    },
+
     async selectShow(showId, showName, e) {
         if (e && e.target) {
             e.target.disabled = true;
@@ -1719,9 +2052,10 @@ window.R = {
         
         modalOverlay.classList.add("hidden");
         status(`Matching against ${showName}…`);
-        
+
         const filesToMatch = window._pendingMatchFiles || [];
-        
+        const ticker = startMatchProgressTicker();
+
         try {
             const data = await api("/api/match", {
                 method: "POST",
@@ -1735,30 +2069,38 @@ window.R = {
                 }),
             });
             
-            // Rebuild matchResults
-            matchResults = new Array(scannedFiles.length).fill(null);
+            // MERGE results into matchResults (don't rebuild): F7's manual
+            // search re-matches only one clean_name group, and a rebuild would
+            // wipe every other row's existing match. For the disambiguation
+            // flow the whole selection is in flight, so merge ≡ rebuild there.
+            if (matchResults.length !== scannedFiles.length) {
+                matchResults = new Array(scannedFiles.length).fill(null);
+            }
             const resultMap = new Map();
             for (const r of data.results) {
                 resultMap.set(r.original, r);
             }
             for (let i = 0; i < scannedFiles.length; i++) {
-                matchResults[i] = resultMap.get(scannedFiles[i].path) || null;
+                const r = resultMap.get(scannedFiles[i].path);
+                if (r) matchResults[i] = r;
             }
 
             applyConfidenceGate();
             renderLeft();   // reflect any rows the gate deselected
             renderRight();
             renderGutter();
-            btnRename.disabled = !matchResults.some(r => r && r.matched);
-            const matched = matchResults.filter(r => r && r.matched).length;
+            updateFooter();
+            const matched = data.results.filter(r => r && r.matched).length;
             statusDone(`Matched ${matched} of ${filesToMatch.length} file(s) with ${showName}`);
         } catch (err) {
             statusDone("Match failed: " + err.message);
+        } finally {
+            clearInterval(ticker);
         }
-        
+
         delete window._pendingMatchFiles;
     },
-    
+
     // ─── Drag & Drop for manual match adjustment ───────────────
     dragStart(e, idx, pane) {
         draggedIdx = idx;
@@ -1829,7 +2171,7 @@ window.R = {
     },
     
     async undoOperation(operationId) {
-        if (!await confirmDialog("Undo this rename operation? The file will be moved back to its original location.", { okText: "Undo" })) return;
+        if (!await confirmDialog("Undo this operation? Moves the file back, or removes the created copy/link.", { okText: "Undo" })) return;
 
         try {
             const data = await api(`/api/undo/${operationId}`, { method: "POST" });
@@ -1845,6 +2187,24 @@ window.R = {
         }
     },
     
+    showAllHistory() {
+        showHistory(1000);
+    },
+
+    async undoBatch(batchId) {
+        if (!await confirmDialog("Undo this entire batch? Files are restored in reverse order.", { okText: "Undo all", danger: true })) return;
+        try {
+            const r = await api("/api/undo-batch/" + encodeURIComponent(batchId), { method: "POST" });
+            status(`Reverted ${r.success} of ${r.total}`);
+            setTimeout(() => statusHide(), 2500);
+            R.closeModal();
+            setTimeout(() => showHistory(), 300);
+        } catch (err) {
+            status("Batch undo failed: " + err.message);
+            setTimeout(() => statusHide(), 3000);
+        }
+    },
+
     async clearHistory() {
         if (!await confirmDialog("Clear all history? This cannot be undone.", { okText: "Clear History", danger: true })) return;
 
@@ -1943,7 +2303,7 @@ window.R = {
 
         renderRight();
         renderGutter();
-        btnRename.disabled = !matchResults.some(r => r && r.matched);
+        updateFooter();
         focusRow(idx);
 
         status(`Manual name set: ${newFilename}`);
@@ -2076,7 +2436,7 @@ document.addEventListener("keydown", e => {
     }
     // Escape: close modal
     if (e.key === "Escape") {
-        modalOverlay.classList.add("hidden");
+        R.closeModal();
     }
 });
 
@@ -2116,7 +2476,7 @@ function removeSingleFile(idx) {
     renderGutter();
     leftCount.textContent = scannedFiles.length;
     btnMatch.disabled = scannedFiles.length === 0;
-    btnRename.disabled = !matchResults.some(r => r && r.matched);
+    updateFooter();
 }
 
 function removeSelected() {
@@ -2133,13 +2493,13 @@ function removeSelected() {
     renderGutter();
     leftCount.textContent = scannedFiles.length;
     btnMatch.disabled = scannedFiles.length === 0;
-    btnRename.disabled = !matchResults.some(r => r && r.matched);
+    updateFooter();
 }
 
 /* ─── Modal ───────────────────────────────────────────────── */
-modalClose.addEventListener("click", () => modalOverlay.classList.add("hidden"));
+modalClose.addEventListener("click", () => R.closeModal());
 modalOverlay.addEventListener("click", e => {
-    if (e.target === modalOverlay) modalOverlay.classList.add("hidden");
+    if (e.target === modalOverlay) R.closeModal();
 });
 
 /* ─── File icon SVG helper ────────────────────────────────── */

@@ -38,8 +38,19 @@ find_system_python() {
         done
     fi
 
-    # Fall back to any Python 3.9+
-    for minor in 13 12 11 10 9; do
+    # Prefer the generic python3 binary and let IT report its version —
+    # this works for any future minor (a hardcoded 13..9 loop silently
+    # missed Python 3.14 on Fedora 44).
+    for pre in $prefixes; do
+        local generic="$pre/python3"
+        if [ -x "$generic" ] && "$generic" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+            echo "$generic"; return 0
+        fi
+    done
+
+    # Last resort: explicit versioned names (covers systems where python3
+    # itself is <3.9 but a newer versioned interpreter is installed).
+    for minor in 20 19 18 17 16 15 14 13 12 11 10 9; do
         for pre in $prefixes; do
             local candidate3="$pre/python3.$minor"
             [ -x "$candidate3" ] && { echo "$candidate3"; return 0; }
@@ -81,7 +92,9 @@ if [ -d "$VENV" ]; then
 
     if [ -z "$SYS_PY" ]; then
         echo "WARNING: CineSort could not find Python 3.9+ on this system." >&2
-        echo "         Install Python 3.9 or later and re-run: sudo dpkg --configure cinesort" >&2
+        echo "         Install Python 3.9 or later, then re-run this setup:" >&2
+        echo "           deb:  sudo dpkg --configure cinesort" >&2
+        echo "           rpm:  sudo dnf reinstall cinesort   (or just relaunch the app)" >&2
     else
         SYS_MINOR="$("$SYS_PY" -c 'import sys; print(str(sys.version_info.major)+"."+str(sys.version_info.minor))')"
 

@@ -116,6 +116,33 @@ function updateFooter() {
     }
 }
 
+/* ─── Start over (brand button) ───────────────────────────── */
+/* Bumped by startOver(); async scan/match handlers capture it before their
+   await and bail if it changed, so a slow response can't repopulate panes
+   the user just cleared. */
+let sessionGen = 0;
+
+function startOver() {
+    sessionGen++;
+    scannedFiles = [];
+    matchResults = [];
+    selectedSet = new Set();
+    focusedIdx = null;
+    elScanPath.value = "";
+    viewFilter = "all";
+    document.querySelectorAll("#view-filter .seg-btn").forEach(b =>
+        b.classList.toggle("on", b.dataset.filter === "all"));
+    btnMatch.disabled = true;
+    btnRename.disabled = true;
+    renderLeft();
+    renderRight();
+    renderGutter();
+    updateFooter();
+    updateTemplatePreview();   // back to the no-files hint state
+    statusHide();
+}
+$id("btn-home")?.addEventListener("click", startOver);
+
 /* Jump to the first match that needs review */
 btnReview?.addEventListener("click", () => {
     for (let i = 0; i < matchResults.length; i++) {
@@ -196,44 +223,59 @@ async function api(url, opts = {}) {
     return res.json();
 }
 
-/* ─── Prevent browser from opening dropped files ──────────── */
-document.addEventListener("dragover", e => { e.preventDefault(); e.stopPropagation(); });
-document.addEventListener("dragenter", e => { e.preventDefault(); e.stopPropagation(); });
-document.addEventListener("drop", e => { e.preventDefault(); e.stopPropagation(); });
-
-/* ─── Drag & Drop on left pane ────────────────────────────── */
+/* ─── Drag & Drop (whole window) ──────────────────────────── */
+/* External OS drags are accepted ANYWHERE in the window — a drop shouldn't
+   miss just because it landed outside the left pane. Internal row drags
+   (draggedIdx !== null) are owned by the row handlers in R; the document
+   handlers ignore them. Everything hangs off document so re-rendering the
+   panes' innerHTML can never detach a listener mid-drag. */
 let dragCounter = 0;
-const dropTarget = $id("pane-left");
 
-dropTarget.addEventListener("dragenter", e => {
+function isFileDrag(e) {
+    // During dragenter/dragover only the TYPES are readable, not the data.
+    const types = (e.dataTransfer && e.dataTransfer.types) || [];
+    return Array.from(types).some(t => t === "Files" || t === "text/uri-list");
+}
+
+function clearDragHighlight() {
+    dragCounter = 0;
+    const dz = $id("drop-zone");
+    if (dz) dz.classList.remove("drag-hover");
+    document.body.classList.remove("dragging-over");
+}
+
+document.addEventListener("dragenter", e => {
     e.preventDefault();
+    if (!isFileDrag(e)) return;   // internal row drag — no highlight
     dragCounter++;
     const dz = $id("drop-zone");
     if (dz) dz.classList.add("drag-hover");
     document.body.classList.add("dragging-over");
 });
-dropTarget.addEventListener("dragleave", e => {
+document.addEventListener("dragleave", e => {
     e.preventDefault();
-    dragCounter--;
-    if (dragCounter <= 0) {
-        dragCounter = 0;
-        const dz = $id("drop-zone");
-        if (dz) dz.classList.remove("drag-hover");
-        document.body.classList.remove("dragging-over");
-    }
+    if (!isFileDrag(e)) return;
+    if (--dragCounter <= 0) clearDragHighlight();
 });
-dropTarget.addEventListener("dragover", e => {
+document.addEventListener("dragover", e => {
+    // Must be prevented continuously or the browser refuses the drop.
     e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
+    // Don't clobber the "move" effect the row handlers set for internal drags.
+    if (isFileDrag(e) && e.dataTransfer) e.dataTransfer.dropEffect = "copy";
 });
-dropTarget.addEventListener("drop", e => {
+// A cancelled drag (Esc / dropped outside the window) fires dragend but not
+// necessarily dragleave — without this the highlight ring sticks forever.
+document.addEventListener("dragend", clearDragHighlight);
+document.addEventListener("drop", e => {
     e.preventDefault();
-    e.stopPropagation();
-    dragCounter = 0;
-    const dz = $id("drop-zone");
-    if (dz) dz.classList.remove("drag-hover");
-    document.body.classList.remove("dragging-over");
+    clearDragHighlight();
+    if (!isFileDrag(e)) return;   // internal row drag that missed a row
+    // A modal (browse / history / settings) is open — don't scan behind it.
+    if (!modalOverlay.classList.contains("hidden")) return;
+    handleExternalDrop(e);
+});
 
+function handleExternalDrop(e) {
     const files = Array.from(e.dataTransfer.files || []);
 
     // ── Electron: webUtils.getPathForFile gives full filesystem path ──
@@ -282,7 +324,7 @@ dropTarget.addEventListener("drop", e => {
     if (files.length > 0) {
         showLocateDialog(files.map(f => f.name));
     }
-});
+}
 
 function showLocateDialog(filenames) {
     modalTitle.textContent = "Locate Files";
@@ -324,11 +366,13 @@ function showLocateDialog(filenames) {
 
         // Use batch scan endpoint
         status("Scanning dropped files…");
+        const gen = sessionGen;
         try {
             const data = await api("/api/scan-batch", {
                 method: "POST",
                 body: JSON.stringify({ paths: fullPaths }),
             });
+            if (gen !== sessionGen) return;   // user hit "start over" meanwhile
             scannedFiles = data.files;
             matchResults = [];
             selectedSet = new Set(scannedFiles.map((_, i) => i));
@@ -494,18 +538,22 @@ function renderConflictsDialog() {
 
 async function handleDroppedPaths(paths) {
     status("Scanning dropped files…");
+    const gen = sessionGen;
 
     // If a single directory was dropped, scan it
     // If multiple files, scan each one individually
     // We'll try scanning the first path as a directory first
     try {
+        // Collect into a local first — only committed to scannedFiles after
+        // the sessionGen check below, so "start over" can't be overwritten.
+        let files;
         // If it's a single folder
         if (paths.length === 1) {
             const data = await api("/api/scan", {
                 method: "POST",
                 body: JSON.stringify({ path: paths[0], recursive: elRecursive.checked }),
             });
-            scannedFiles = data.files;
+            files = data.files;
         } else {
             // Multiple files — scan each parent dir? Or scan individually
             // Actually send them one by one to scan (which handles single files)
@@ -519,9 +567,11 @@ async function handleDroppedPaths(paths) {
                     allFiles.push(...data.files);
                 } catch { /* skip non-media files */ }
             }
-            scannedFiles = allFiles;
+            files = allFiles;
         }
+        if (gen !== sessionGen) return;   // user hit "start over" meanwhile
 
+        scannedFiles = files;
         matchResults = [];
         selectedSet = new Set(scannedFiles.map((_, i) => i));
         renderLeft();
@@ -679,12 +729,14 @@ btnBrowse.addEventListener("click", () => {
 /* Shared: scan a list of file/folder paths and load them into the panes. */
 async function scanPaths(paths) {
     status(`Scanning ${paths.length} item(s)…`);
+    const gen = sessionGen;
     try {
         const data = await api("/api/scan-batch", {
             method: "POST",
             // Honor the "Include subfolders" toggle for folder selections too.
             body: JSON.stringify({ paths, recursive: elRecursive.checked }),
         });
+        if (gen !== sessionGen) return;   // user hit "start over" meanwhile
         scannedFiles = data.files;
         matchResults = [];
         selectedSet = new Set(scannedFiles.map((_, i) => i));
@@ -1019,12 +1071,14 @@ async function doScan() {
 
     status("Scanning…");
     btnScan.disabled = true;
+    const gen = sessionGen;
 
     try {
         const data = await api("/api/scan", {
             method: "POST",
             body: JSON.stringify({ path, recursive: elRecursive.checked }),
         });
+        if (gen !== sessionGen) return;   // user hit "start over" meanwhile
         scannedFiles = data.files;
         matchResults = [];
         selectedSet = new Set(scannedFiles.map((_, i) => i));
@@ -1078,6 +1132,7 @@ async function doMatch() {
     status(`Matching ${filesToMatch.length} file(s) against ${src}…`);
     const ticker = startMatchProgressTicker();
     btnMatch.disabled = true;
+    const gen = sessionGen;
 
     try {
         const data = await api("/api/match", {
@@ -1089,6 +1144,7 @@ async function doMatch() {
                 include_adult: elIncludeAdult.checked,
             }),
         });
+        if (gen !== sessionGen) return;   // user hit "start over" meanwhile
         clearInterval(ticker);
 
         // Check if we need user to select from multiple shows
@@ -2055,6 +2111,7 @@ window.R = {
 
         const filesToMatch = window._pendingMatchFiles || [];
         const ticker = startMatchProgressTicker();
+        const gen = sessionGen;
 
         try {
             const data = await api("/api/match", {
@@ -2068,7 +2125,8 @@ window.R = {
                     selected_show_name: showName,
                 }),
             });
-            
+            if (gen !== sessionGen) return;   // user hit "start over" meanwhile
+
             // MERGE results into matchResults (don't rebuild): F7's manual
             // search re-matches only one clean_name group, and a rebuild would
             // wipe every other row's existing match. For the disambiguation
@@ -2111,20 +2169,28 @@ window.R = {
     },
     
     dragOver(e, idx, pane) {
+        // External OS drag over a row: leave it to the document-level
+        // handlers (whole window accepts file drops) — don't claim "move".
+        // isFileDrag beats a draggedIdx check: it can't go stale.
+        if (draggedIdx === null || isFileDrag(e)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
-        
+
         // Highlight drop target
-        if (draggedIdx !== null && draggedIdx !== idx) {
+        if (draggedIdx !== idx) {
             e.currentTarget.classList.add("drag-over");
         }
     },
-    
+
     drop(e, targetIdx, targetPane) {
+        // External OS drag dropped on a row: bubble up to the document
+        // handler so the files get scanned — previously this swallowed the
+        // drop, making drag&drop "randomly" fail whenever the panes had rows.
+        if (draggedIdx === null || isFileDrag(e)) return;
         e.preventDefault();
         e.stopPropagation();
-        
-        if (draggedIdx === null || draggedIdx === targetIdx) return;
+
+        if (draggedIdx === targetIdx) return;
         
         // Case 1: Drag from left to right (or right to right) = swap matches
         if (targetPane === "right") {

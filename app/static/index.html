@@ -21,13 +21,15 @@
     <div class="app">
         <!-- ═══ App bar ═══ -->
         <header class="appbar">
-            <div class="logo-tile" aria-hidden="true">
-                <img src="/static/logo_tile.png" alt="" width="38" height="38">
-            </div>
-            <div class="app-id">
-                <div class="app-name">CineSort</div>
-                <div class="app-tag">Scan, match, and rename your media</div>
-            </div>
+            <button type="button" class="app-home" id="btn-home" title="Start over — clear the file list and results">
+                <div class="logo-tile" aria-hidden="true">
+                    <img src="/static/logo_tile.png" alt="" width="38" height="38">
+                </div>
+                <div class="app-id">
+                    <div class="app-name">CineSort <span class="reset-hint">Start over</span></div>
+                    <div class="app-tag">Scan, match, and rename your media</div>
+                </div>
+            </button>
             <div class="appbar-actions">
                 <button id="btn-history" class="glass-btn" title="View rename history">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
@@ -89,7 +91,7 @@
                 <div class="field field-template">
                     <label class="field-label" for="template">Naming template</label>
                     <input type="text" id="template" class="glass-input mono"
-                           value="{name}/Season {s}/{name} - {s00e00} - {title}" spellcheck="false">
+                           value="{name} ({year})/{name} ({year})" spellcheck="false">
                 </div>
             </div>
             <div class="template-row">

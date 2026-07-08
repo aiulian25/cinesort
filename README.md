@@ -11,6 +11,28 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 
 ---
 
+## Screenshots
+
+**Scan, match, and review** — original files on the left, clean new names with per-file selection and confidence on the right:
+
+![Match and selection](docs/screenshots/match.png)
+
+**Landing page** — source, action, and naming template with live preview and one-click presets:
+
+![Landing page](docs/screenshots/landing.png)
+
+**Rename results** — every operation is confirmed and undoable from History:
+
+![Rename results](docs/screenshots/rename.png)
+
+**Settings** — API keys (stored masked), metadata language, dark and light themes:
+
+![Settings](docs/screenshots/settings.png)
+
+*The example files shown are public-domain films. Metadata in the match view comes from the TMDb API.*
+
+---
+
 ## Features
 
 ### Core
@@ -230,12 +252,13 @@ volumes:
 
 ### 1. Scan files
 
-- Enter a folder path in the scan bar, or **drag & drop** files/folders onto the left pane
+- Enter a folder path in the scan bar, or **drag & drop** files/folders anywhere onto the app window
 - Click **Browse**:
   - **Desktop (deb/AppImage):** opens your native OS picker — choose folders or files anywhere on the machine
   - **Docker / web:** opens the in-app browser — shortcuts sidebar, editable path/breadcrumb, type-ahead filter, "media only" toggle, and checkbox multi-select that **persists across folders**; navigate with ↑/↓, Space to select, Enter to open, Backspace to go up
 - Toggle **Recursive** to include sub-folders
 - Click **Scan**
+- **Start over any time:** hover the CineSort logo/name in the top-left corner — a "Start over" hint appears; clicking it clears the file list, matches, and selections so you can begin a fresh session without removing files one by one
 
 ### 2. Match metadata
 
@@ -261,7 +284,7 @@ When a file shows **No match found** in the right pane:
 | Preset | Template | Use for |
 |--------|----------|---------|
 | **TV** | `{n}/Season {s}/{n} - {s00e00} - {t}` | Plex/Jellyfin TV libraries |
-| **Film** | `{n} ({y})/{n} ({y})` | Plex/Jellyfin movie libraries |
+| **Film** (default) | `{n} ({y})/{n} ({y})` | Plex/Jellyfin movie libraries |
 | **Anime** | `{n}/{n} - {absolute} - {t}` | Absolute-numbered anime |
 | **Flat** | `{n} - {s00e00} - {t}` | Rename in-place, no folders |
 
@@ -372,6 +395,8 @@ docker inspect cinesort | grep Health
 | **TMDb** | | Optional | ~50 req/s | Mainstream movies & TV; adult flag available |
 | **TVMaze** | | None | Reasonable use | TV only |
 | **OMDb** | | Required | 1,000/day (free tier) | IMDb data; no adult filtering |
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 ---
 

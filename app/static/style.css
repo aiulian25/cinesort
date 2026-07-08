@@ -42,10 +42,30 @@ body {
 
 /* ─── App bar ─────────────────────────────────────────────────── */
 .appbar {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
     flex-shrink: 0;
     padding: 2px 2px 0;
 }
+/* Brand block doubles as the "start over" button: hovering (or keyboard-
+   focusing) it reveals the hint pill; clicking clears the whole session. */
+.app-home {
+    display: inline-flex; align-items: center; gap: 12px;
+    background: none; border: 0; padding: 0; margin: 0;
+    font-family: var(--font); text-align: left; cursor: pointer;
+    border-radius: var(--radius-xs);
+}
+.app-home:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.reset-hint {
+    display: inline-block;
+    font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--accent); background: var(--accent-t);
+    padding: 2px 8px; border-radius: 20px; margin-left: 6px; vertical-align: 1px;
+    opacity: 0; transform: translateX(-4px);
+    transition: opacity .15s var(--ease), transform .15s var(--ease);
+}
+.app-home:hover .reset-hint,
+.app-home:focus-visible .reset-hint { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .reset-hint { transition: none; } }
 .logo-tile {
     width: 38px; height: 38px; border-radius: 9px; flex-shrink: 0;
     overflow: hidden;

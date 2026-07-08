@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.3.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.1-green.svg)
 
 ---
 
@@ -57,7 +57,8 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 - **Template builder** — Insert `{tokens}` from a palette and see a live preview of the resulting path
 - **Bulk selection** — One-click "Matched", "≥60%", and "Clear unmatched"
 - **Inline conflict resolution** — Resolve duplicate/exists conflicts in place with **Skip** or **Rename → (2)**
-- **Drag & Drop** — Drop files or folders directly onto the left pane (deb/AppImage, Wayland-aware)
+- **Drag & Drop** — Drop files or folders anywhere onto the app window (deb/AppImage, Wayland-aware)
+- **Start over** — Click the CineSort logo to clear the session and begin fresh
 - **Row reordering** — Drag rows to manually remap files to matches
 - **Per-file Removal** — DEL key or right-click → Remove
 - **Show in folder** — Reveal the original file in your file manager (desktop)
@@ -100,20 +101,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.0_amd64.deb # arm64: cinesort_1.3.0_arm64.deb
+sudo dpkg -i cinesort_1.3.1_amd64.deb # arm64: cinesort_1.3.1_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.0.x86_64.rpm # arm64: cinesort-1.3.0.aarch64.rpm
+sudo dnf install ./cinesort-1.3.1.x86_64.rpm # arm64: cinesort-1.3.1.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.0.AppImage # arm64: CineSort-1.3.0-arm64.AppImage
-./CineSort-1.3.0.AppImage
+chmod +x CineSort-1.3.1.AppImage # arm64: CineSort-1.3.1-arm64.AppImage
+./CineSort-1.3.1.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -512,6 +513,12 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.3.1
+- **Start over** — the CineSort logo/name is now a reset button: hover reveals a "Start over" hint; clicking clears the file list, matches, and selections in one go (no more removing files one by one). In-flight scans/matches can't repopulate a cleared session.
+- **Drag & drop fixed and widened** — drops are now accepted **anywhere in the app window**, and dropping new files while results are on screen no longer gets silently swallowed by the row-reorder handlers (the "takes a couple of tries" bug). Cancelled drags no longer leave a stuck highlight; drops are ignored while a modal is open.
+- **Film is the default template** on fresh installs (previously TV); your saved template still wins.
+- **README screenshots** — dark-theme captures of the real app (public-domain example files, masked keys) plus the TMDB attribution required by their API terms.
 
 ### v1.3.0
 - **Complete UI redesign** — flat, modern interface (glassmorphism and animated backgrounds removed): app bar with logo tile, options card with friendly template tokens (`{name}`, `{year}`, `{title}`, `{quality}` — old short tokens still work), footer action bar with live "N of M files ready", All/Matched/Unmatched view filter, and per-row status icons. Themes reduced to **Dark** and **Light**.

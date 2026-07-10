@@ -140,6 +140,11 @@ function startOver() {
     updateFooter();
     updateTemplatePreview();   // back to the no-files hint state
     statusHide();
+    // Persist the cleared scan path — without this, restorePrefs() resurrects
+    // the old folder on the next load and "Start over" looks like it did
+    // nothing. (Template/source/action/theme are prefs, not session state;
+    // they persist unchanged.)
+    persistPrefs();
 }
 $id("btn-home")?.addEventListener("click", startOver);
 
@@ -1357,7 +1362,26 @@ async function showSettings() {
             <button class="glass-btn" onclick="R.closeModal()" style="flex:1">Cancel</button>
             <button class="glass-btn btn-scan" id="settings-save" style="flex:2">Save &amp; Apply</button>
         </div>
-        <p id="settings-msg" style="font-size:11px;margin-top:10px;min-height:16px"></p>`;
+        <p id="settings-msg" style="font-size:11px;margin-top:10px;min-height:16px"></p>
+        <p id="settings-version" style="font-size:11px;margin-top:4px;color:var(--txt3)"></p>`;
+
+    // Version + update notice (best-effort; the modal works without it).
+    // Same endpoint on every build target — only the "how to update" wording
+    // differs, chosen client-side: desktop links the release page, Docker
+    // shows the pull command.
+    api("/api/version").then(v => {
+        const el = $id("settings-version");
+        if (!el || !v || !v.version) return;
+        let html = `CineSort v${esc(v.version)}`;
+        if (v.update && v.update.latest) {
+            html += isElectron
+                ? ` · <a href="${esc(v.update.url || "https://github.com/aiulian25/cinesort/releases")}"
+                       target="_blank" rel="noopener noreferrer">Update available: v${esc(v.update.latest)}</a>`
+                : ` · Update available: v${esc(v.update.latest)} — run:
+                    <code>docker compose pull &amp;&amp; docker compose up -d</code>`;
+        }
+        el.innerHTML = html;
+    }).catch(() => { /* version line stays empty — non-fatal */ });
 
     // Theme picker — applies instantly and persists.
     modalBody.querySelectorAll(".theme-swatch").forEach(sw => {

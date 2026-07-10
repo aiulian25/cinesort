@@ -20,6 +20,8 @@ import os
 import re
 import time
 import asyncio
+
+import httpx
 from pathlib import Path
 from typing import Optional
 
@@ -51,7 +53,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.3.1")
+app = FastAPI(title="CineSort", version="1.3.2")
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -223,6 +225,19 @@ def _file_entry(p: Path) -> dict:
     }
 
 
+# Natural (human numeric) sort for scan listings: "E2" before "E10",
+# "Season 2/" before "Season 10/". Keyed on the FULL path — not just the
+# filename — so recursive scans keep files grouped by directory exactly like
+# the plain sorted() they replace. Splitting on the digit capture group keeps
+# int/str positions parity-aligned between any two keys, so mixed-type
+# comparisons can never occur.
+_NAT_RE = re.compile(r"(\d+)")
+
+
+def _natural_key(p: Path):
+    return [int(t) if t.isdigit() else t.lower() for t in _NAT_RE.split(str(p))]
+
+
 def _scan_dir_sync(path: str, recursive: bool) -> dict:
     base = Path(path)
     media_exts = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS | AUDIO_EXTENSIONS
@@ -230,9 +245,9 @@ def _scan_dir_sync(path: str, recursive: bool) -> dict:
     if base.is_file():
         paths = [base]
     elif recursive:
-        paths = sorted(base.rglob("*"))
+        paths = sorted(base.rglob("*"), key=_natural_key)
     else:
-        paths = sorted(base.iterdir())
+        paths = sorted(base.iterdir(), key=_natural_key)
 
     files = [
         _file_entry(p)
@@ -248,7 +263,11 @@ def _scan_batch_sync(path_list: list[str], recursive: bool) -> dict:
     for path_str in path_list:
         p = Path(path_str)
         if p.is_dir():
-            targets = sorted(p.rglob("*")) if recursive else sorted(p.iterdir())
+            targets = (
+                sorted(p.rglob("*"), key=_natural_key)
+                if recursive
+                else sorted(p.iterdir(), key=_natural_key)
+            )
         else:
             targets = [p]
         files.extend(
@@ -659,7 +678,7 @@ async def _match_files_impl(req: MatchRequest):
         key = f.get("clean_name", "unknown")
         groups.setdefault(key, []).append(f)
 
-    # Real progress (replaces the old [DEBUG] prints): the UI polls
+    # Real progress (replaces the old debug prints): the UI polls
     # /api/match-progress and renders "Matching group X/Y: NAME (N files)…".
     # Each music file counts as its own group (MusicBrainz is 1 req/s, so
     # per-file progress is exactly what makes long audio batches bearable).
@@ -762,6 +781,12 @@ async def _match_files_impl(req: MatchRequest):
         # Search for metadata
         show_data = None
         episodes_data = []
+        # Truthful failure tracking (per group): seasons whose episode fetch
+        # raised, and a whole-list fetch failure (TVmaze single call). Without
+        # these, a network blip during season 3 made every S03 file claim
+        # "No episode match in 'Show'" — implying the episode doesn't exist.
+        failed_seasons: dict[int, str] = {}
+        episodes_fetch_error: Optional[str] = None
 
         if media_type == "series":
             # Check if user already selected a specific show
@@ -770,7 +795,11 @@ async def _match_files_impl(req: MatchRequest):
                 if req.datasource == "tvmaze":
                     show_details = await tvmaze.get_show(req.selected_show_id)
                     show_data = {"id": show_details.id, "name": show_details.name, "year": show_details.year, "poster": show_details.image_url}
-                    eps = await tvmaze.get_episodes(req.selected_show_id)
+                    try:
+                        eps = await tvmaze.get_episodes(req.selected_show_id)
+                    except Exception as exc:
+                        episodes_fetch_error = _sanitize_error(exc)
+                        eps = []
                     episodes_data = [
                         {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
                         for e in eps
@@ -787,8 +816,8 @@ async def _match_files_impl(req: MatchRequest):
                                 {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
                                 for e in eps
                             ])
-                        except Exception:
-                            continue
+                        except Exception as exc:
+                            failed_seasons[sn] = _sanitize_error(exc)
             else:
                 # Search (with progressively-trimmed fallback queries) and check
                 # for multiple matches.
@@ -813,7 +842,11 @@ async def _match_files_impl(req: MatchRequest):
                     elif shows:
                         show = shows[0]
                         show_data = {"id": show.id, "name": show.name, "year": show.year, "poster": show.image_url}
-                        eps = await tvmaze.get_episodes(show.id)
+                        try:
+                            eps = await tvmaze.get_episodes(show.id)
+                        except Exception as exc:
+                            episodes_fetch_error = _sanitize_error(exc)
+                            eps = []
                         episodes_data = [
                             {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
                             for e in eps
@@ -849,8 +882,21 @@ async def _match_files_impl(req: MatchRequest):
                                     {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
                                     for e in eps
                                 ])
-                            except Exception:
-                                continue
+                            except Exception as exc:
+                                failed_seasons[sn] = _sanitize_error(exc)
+
+            # Surface fetch failures in the match status line too (first one
+            # wins, matching the _cascade_search convention above).
+            if failed_seasons:
+                first_sn = sorted(failed_seasons)[0]
+                source_errors.setdefault(
+                    req.datasource,
+                    f"season {first_sn} fetch failed: {failed_seasons[first_sn]}",
+                )
+            if episodes_fetch_error:
+                source_errors.setdefault(
+                    req.datasource, f"episode list fetch failed: {episodes_fetch_error}"
+                )
 
             # Match each file to an episode.
             # Build O(1) lookup indexes once per show and assign absolute numbers
@@ -863,7 +909,14 @@ async def _match_files_impl(req: MatchRequest):
                 fs, fe = f.get("season"), f.get("episode")
                 fabs = f.get("absolute")
 
-                if fs is not None and fe is not None and (fs, fe) in se_index:
+                if fs is not None and fs in failed_seasons:
+                    # This file's season never downloaded. Don't let the
+                    # cascade fallback "match" it to an episode from another
+                    # season at a junk score — fall through unmatched so the
+                    # truthful season-failure reason below is what the user
+                    # sees.
+                    pass
+                elif fs is not None and fe is not None and (fs, fe) in se_index:
                     # Exact season/episode hit — no need to score every episode.
                     best_ep = se_index[(fs, fe)]
                     best_score = 1.0
@@ -942,10 +995,21 @@ async def _match_files_impl(req: MatchRequest):
                         },
                     })
                 else:
-                    # Why did this series file fail? Distinguish "show found
-                    # but no episode fit" / "source errored" / "key missing" /
+                    # Why did this series file fail? Distinguish "season failed
+                    # to download" / "episode list failed" / "show found but no
+                    # episode fit" / "source errored" / "key missing" /
                     # "genuinely no results".
-                    if show_data:
+                    if fs is not None and fs in failed_seasons:
+                        reason = (
+                            f"Season {fs} could not be loaded from "
+                            f"{req.datasource} ({failed_seasons[fs]})"
+                        )
+                    elif show_data and episodes_fetch_error:
+                        reason = (
+                            f"Episode list could not be loaded from "
+                            f"{req.datasource} ({episodes_fetch_error})"
+                        )
+                    elif show_data:
                         reason = f"No episode match in '{show_data.get('name', group_name)}'"
                     elif req.datasource in source_errors:
                         reason = f"{req.datasource} error: {source_errors[req.datasource]}"
@@ -1005,7 +1069,6 @@ async def _match_files_impl(req: MatchRequest):
                         "id": r.imdb_id,
                         "source": "omdb",
                     })
-                print(f"[DEBUG] OMDb returned {len(omdb_results)} result(s) for '{group_name}'")
 
             # De-duplicate candidates that appear in both sources (same title+year);
             # keep the first (TMDB, which carries richer metadata + poster).
@@ -1018,8 +1081,6 @@ async def _match_files_impl(req: MatchRequest):
                 seen_keys.add(key)
                 deduped.append(c)
             movie_candidates = deduped
-
-            print(f"[DEBUG] Total movie candidates for '{group_name}': {len(movie_candidates)}")
 
             template = req.template or TEMPLATES["movie"]
             for f in group_files:
@@ -1305,19 +1366,31 @@ async def preview_template(req: PreviewRequest):
         val = s.get(key)
         return default if val in (None, "") else val
 
+    # Music samples (media_type "music" from _file_entry) get music-flavored
+    # placeholders. {title} resolves through "t" via the formatter's alias
+    # loop, so ONE binding serves episode and track titles — a separate
+    # "title" key would leak "Track Title" into TV previews for video samples
+    # (their _file_entry carries title=None).
+    is_music = s.get("media_type") == "music"
     bindings = {
         "n": pick("clean_name", "Show Name"),
         "y": pick("year", 2024),
         "s": s.get("season") if s.get("season") is not None else 1,
         "e": s.get("episode") if s.get("episode") is not None else 1,
         "e_end": s.get("episode_end"),
-        "t": pick("title", "Episode Title"),
+        "t": pick("title", "Track Title" if is_music else "Episode Title"),
         "absolute": s.get("absolute") if s.get("absolute") is not None else 1,
         "d": pick("date", "2024-01-01"),
         "source": pick("source", "WEB-DL"),
         "vf": pick("video_format", "1080p"),
         "group": pick("group", "GROUP"),
         "id": pick("id", 0),
+        # Music tokens: real values from the parsed stem (parse_music_info),
+        # placeholders otherwise. {track} zero-pads exactly like the real
+        # music match path (zfill(2)) so preview and rename can't drift.
+        "artist": pick("artist", "Artist"),
+        "album": pick("album", "Album"),
+        "track": str(s.get("track") or 1).zfill(2),
     }
     try:
         preview = apply_template(req.template, bindings)
@@ -1355,6 +1428,62 @@ async def get_actions():
         for a in RenameAction if a.value not in listed
     )
     return items
+
+
+# ─── Version / update check ────────────────────────────────────────────
+
+# One check per 24 h, cached in memory (per process — a container restart
+# re-checks, which is fine). Failures cache as "no update" so a GitHub outage
+# or an offline LAN never delays a request beyond the 3 s timeout, and only
+# once per day. CINESORT_UPDATE_CHECK=0 disables the outbound request entirely
+# (deployment-layer knob, same pattern as CINESORT_BROWSE_ROOTS).
+GITHUB_LATEST_URL = "https://api.github.com/repos/aiulian25/cinesort/releases/latest"
+UPDATE_CHECK_INTERVAL = 86400.0
+_update_cache: dict = {"checked_at": 0.0, "result": None}
+
+
+def _version_tuple(v: str) -> tuple:
+    """'v1.10.2' → (1, 10, 2); unparseable → () (compares as 'no update')."""
+    try:
+        return tuple(int(x) for x in v.strip().lstrip("v").split("."))
+    except ValueError:
+        return ()
+
+
+async def _check_update() -> Optional[dict]:
+    if os.environ.get("CINESORT_UPDATE_CHECK", "1") == "0":
+        return None
+    now = time.time()
+    if now - _update_cache["checked_at"] < UPDATE_CHECK_INTERVAL:
+        return _update_cache["result"]
+    # Stamp BEFORE the request so failures also back off for 24 h.
+    _update_cache["checked_at"] = now
+    _update_cache["result"] = None
+    try:
+        async with httpx.AsyncClient(
+            timeout=3.0, headers={"Accept": "application/vnd.github+json"}
+        ) as client:
+            resp = await client.get(GITHUB_LATEST_URL)
+            resp.raise_for_status()
+            data = resp.json()
+        latest = (data.get("tag_name") or "").lstrip("v")
+        latest_t = _version_tuple(latest)
+        if latest_t and latest_t > _version_tuple(app.version):
+            _update_cache["result"] = {
+                "latest": latest,
+                "url": data.get("html_url")
+                       or "https://github.com/aiulian25/cinesort/releases",
+            }
+    except Exception:
+        pass   # best-effort: no update info beats a slow/failing Settings modal
+    return _update_cache["result"]
+
+
+@app.get("/api/version")
+async def get_version():
+    """Running version + available update (or null). Never raises; never
+    returns anything sensitive — safe on every build target."""
+    return {"version": app.version, "update": await _check_update()}
 
 
 # ─── History Endpoints ─────────────────────────────────────────────────

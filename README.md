@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.3.1-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.2-green.svg)
 
 ---
 
@@ -101,20 +101,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.1_amd64.deb # arm64: cinesort_1.3.1_arm64.deb
+sudo dpkg -i cinesort_1.3.2_amd64.deb # arm64: cinesort_1.3.2_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.1.x86_64.rpm # arm64: cinesort-1.3.1.aarch64.rpm
+sudo dnf install ./cinesort-1.3.2.x86_64.rpm # arm64: cinesort-1.3.2.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.1.AppImage # arm64: CineSort-1.3.1-arm64.AppImage
-./CineSort-1.3.1.AppImage
+chmod +x CineSort-1.3.2.AppImage # arm64: CineSort-1.3.2-arm64.AppImage
+./CineSort-1.3.2.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -212,6 +212,7 @@ Restart the app for changes to take effect when editing the file manually.
 | `TMDB_API_KEY` | *(bundled)* | Custom TMDb v3 API key |
 | `OMDB_API_KEY` | *(none)* | OMDb API key; OMDb is silently disabled without it |
 | `TMDB_LANGUAGE` | *(none — English)* | TMDb metadata language for titles/overviews used in filenames (ISO code, e.g. `de-DE`, `ro-RO`). Also settable in the app Settings. TVmaze/OMDb are English-only. |
+| `CINESORT_UPDATE_CHECK` | `1` | Set to `0` to disable the once-per-day update check against the GitHub releases API (the only non-metadata outbound request; nothing ever auto-installs) |
 | `CINESORT_HOST` | `0.0.0.0` | Server bind address |
 | `CINESORT_PORT` | `8888` | Server port |
 | `CINESORT_DATA_DIR` | `/data` (Docker image) | Where history (`history.json`) and UI-saved API keys (`config/keys.env`) live. The image points it at the `/data` volume so both survive container recreation. Unset on desktop builds (per-user home paths are used). |
@@ -513,6 +514,14 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.3.2
+- **Version & update notice** — Settings now shows the running version and, when a newer release exists, an update link (desktop) or the `docker compose pull` command (Docker). One GitHub check per day, 3-second timeout, disable with `CINESORT_UPDATE_CHECK=0`; nothing ever auto-installs.
+- **Truthful season failures** — when an episode list or a single season can't be downloaded (network blip, provider error), affected files now say exactly that (`Season 3 could not be loaded from tmdb (…)`) instead of the misleading "No episode match"; they are also excluded from cross-season guessing at junk scores. API keys stay redacted in every error.
+- **Natural sorting** — scan results list in human order (`E2` before `E10`, `Season 2` before `Season 10`) while keeping files grouped by folder.
+- **Music preset live preview** — the template preview now renders real artist/album/track/title values for audio files instead of empty tokens.
+- **Start over fix** — clicking the logo now also forgets the remembered scan path, so it no longer reappears after a page refresh or app restart.
+- Removed two leftover debug prints from movie matching.
 
 ### v1.3.1
 - **Start over** — the CineSort logo/name is now a reset button: hover reveals a "Start over" hint; clicking clears the file list, matches, and selections in one go (no more removing files one by one). In-flight scans/matches can't repopulate a cleared session.

@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.3.2-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.3-green.svg)
 
 ---
 
@@ -101,20 +101,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.2_amd64.deb # arm64: cinesort_1.3.2_arm64.deb
+sudo dpkg -i cinesort_1.3.3_amd64.deb # arm64: cinesort_1.3.3_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.2.x86_64.rpm # arm64: cinesort-1.3.2.aarch64.rpm
+sudo dnf install ./cinesort-1.3.3.x86_64.rpm # arm64: cinesort-1.3.3.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.2.AppImage # arm64: CineSort-1.3.2-arm64.AppImage
-./CineSort-1.3.2.AppImage
+chmod +x CineSort-1.3.3.AppImage # arm64: CineSort-1.3.3-arm64.AppImage
+./CineSort-1.3.3.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -213,6 +213,8 @@ Restart the app for changes to take effect when editing the file manually.
 | `OMDB_API_KEY` | *(none)* | OMDb API key; OMDb is silently disabled without it |
 | `TMDB_LANGUAGE` | *(none — English)* | TMDb metadata language for titles/overviews used in filenames (ISO code, e.g. `de-DE`, `ro-RO`). Also settable in the app Settings. TVmaze/OMDb are English-only. |
 | `CINESORT_UPDATE_CHECK` | `1` | Set to `0` to disable the once-per-day update check against the GitHub releases API (the only non-metadata outbound request; nothing ever auto-installs) |
+| `CINESORT_LOW_CONFIDENCE` | `0.4` | Matches at/below this score are never auto-selected for renaming (0–1) |
+| `CINESORT_REVIEW_CONFIDENCE` | `0.6` | Matches below this score show the "needs review" marker and count toward "Review N matches" (0–1) |
 | `CINESORT_HOST` | `0.0.0.0` | Server bind address |
 | `CINESORT_PORT` | `8888` | Server port |
 | `CINESORT_DATA_DIR` | `/data` (Docker image) | Where history (`history.json`) and UI-saved API keys (`config/keys.env`) live. The image points it at the `/data` volume so both survive container recreation. Unset on desktop builds (per-user home paths are used). |
@@ -514,6 +516,9 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.3.3
+- **Configurable confidence gates** — the review (0.6) and auto-select (0.4) thresholds now live in the backend only and are served to the UI at startup, so all build targets share one source of truth. Override per deployment with `CINESORT_REVIEW_CONFIDENCE` / `CINESORT_LOW_CONFIDENCE` (0-1, clamped) — e.g. demand 0.8+ confidence before anything counts as a safe match.
 
 ### v1.3.2
 - **Version & update notice** — Settings now shows the running version and, when a newer release exists, an update link (desktop) or the `docker compose pull` command (Docker). One GitHub check per day, 3-second timeout, disable with `CINESORT_UPDATE_CHECK=0`; nothing ever auto-installs.

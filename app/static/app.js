@@ -16,10 +16,14 @@ let draggedIdx = null;   // index being dragged
 let draggedFrom = null;  // 'left' or 'right'
 let focusedIdx = null;   // keyboard-focused row (DEL/arrow navigation)
 
-// Matches at/below this confidence are flagged "needs review" and are NOT
-// auto-selected for renaming — the user must opt in. Mirrors the backend's
-// LOW_CONFIDENCE_THRESHOLD so all build targets behave identically.
-const LOW_CONFIDENCE = 0.4;
+// Confidence thresholds. These are STARTUP FALLBACKS only — the real values
+// come from GET /api/settings (backend LOW_CONFIDENCE_THRESHOLD /
+// REVIEW_CONFIDENCE_THRESHOLD, env-overridable per deployment), adopted in
+// checkKeysOnStartup() so every build target shares one source of truth.
+// low: at/below this a match is never auto-selected for renaming.
+// review: below this a match shows the review triangle / footer count.
+let LOW_CONFIDENCE = 0.4;
+let REVIEW_CONFIDENCE = 0.6;
 
 /* Deselect weak auto-matches so a low-confidence guess can't be renamed by
    default. Manual names and confident matches keep their selection. */
@@ -92,7 +96,7 @@ function updateFooter() {
         if (m && m.matched) {
             hasMatch = true;
             if (selectedSet.has(i)) ready++;
-            if (!m.manual && m.score < 0.6) review++;
+            if (!m.manual && m.score < REVIEW_CONFIDENCE) review++;
         }
     }
     btnRename.disabled = ready === 0;
@@ -108,7 +112,7 @@ function updateFooter() {
             : (total > 0 ? `${total} file${total === 1 ? "" : "s"} scanned.` : "");
     }
     if (statHigh && statReview) {
-        const high = matchResults.filter(r => r && r.matched && (r.manual || r.score >= 0.6)).length;
+        const high = matchResults.filter(r => r && r.matched && (r.manual || r.score >= REVIEW_CONFIDENCE)).length;
         statHigh.classList.toggle("hidden", high === 0);
         statHigh.textContent = `${high} high`;
         statReview.classList.toggle("hidden", review === 0);
@@ -152,7 +156,7 @@ $id("btn-home")?.addEventListener("click", startOver);
 btnReview?.addEventListener("click", () => {
     for (let i = 0; i < matchResults.length; i++) {
         const m = matchResults[i];
-        if (m && m.matched && !m.manual && m.score < 0.6) {
+        if (m && m.matched && !m.manual && m.score < REVIEW_CONFIDENCE) {
             focusRow(i);
             rightList.querySelector(`.row-item[data-idx="${i}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
             break;
@@ -176,6 +180,11 @@ let appSettings = null;   // cached /api/settings (tmdb_enabled, omdb_enabled, �
     try {
         const s = await api("/api/settings");
         appSettings = s;
+        // Adopt the backend's confidence thresholds (single source of truth;
+        // env-overridable per deployment). Fallback literals above cover the
+        // brief window before this resolves and offline/startup races.
+        if (typeof s.low_confidence === "number") LOW_CONFIDENCE = s.low_confidence;
+        if (typeof s.review_confidence === "number") REVIEW_CONFIDENCE = s.review_confidence;
         if (!s.tmdb_enabled) {
             keyBanner.classList.remove("hidden");
         }
@@ -1659,7 +1668,7 @@ function renderRight() {
             // Status icon replaces the old %-score tag: check = high confidence
             // or manual, triangle = needs review. Exact score + per-metric
             // breakdown remain in the right-click "View metadata" dialog.
-            const isHigh = isManual || m.score >= 0.6;
+            const isHigh = isManual || m.score >= REVIEW_CONFIDENCE;
             const icon = isHigh ? ICON_OK : ICON_REV;
             const manualTag = isManual ? `<span class="tag manual">manual</span>` : "";
 
@@ -2467,7 +2476,7 @@ function bulkSelect(predicate) {
     renderRight();
 }
 $id("bulk-matched")?.addEventListener("click", () => bulkSelect(m => !!(m && m.matched)));
-$id("bulk-high")?.addEventListener("click", () => bulkSelect(m => !!(m && m.matched && m.score >= 0.6)));
+$id("bulk-high")?.addEventListener("click", () => bulkSelect(m => !!(m && m.matched && m.score >= REVIEW_CONFIDENCE)));
 $id("bulk-clear-unmatched")?.addEventListener("click", () => {
     // Deselect rows that have no match; leave matched selections untouched.
     for (let i = 0; i < scannedFiles.length; i++) {

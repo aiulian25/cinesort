@@ -53,7 +53,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.3.2")
+app = FastAPI(title="CineSort", version="1.3.3")
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -519,11 +519,25 @@ async def search_metadata(
 
 # ─── Matching helpers ──────────────────────────────────────────────────
 
-# Matches at or below this confidence are flagged "needs review" and are NOT
-# auto-selected for renaming by the front-end, so a weak guess can never rename
-# a file unless the user opts in. Kept here (backend) so every build target —
-# Docker, deb, AppImage — shares one threshold.
-LOW_CONFIDENCE_THRESHOLD = 0.4
+# Confidence thresholds — SINGLE source of truth for every build target.
+# The frontend fetches both from GET /api/settings at startup instead of
+# hardcoding its own copies, so Docker/deb/rpm/AppImage can never drift.
+#   low:    at/below this a match is never auto-selected for renaming.
+#   review: below this a match shows the "needs review" triangle and counts
+#           toward the footer's "Review N matches".
+# Deployment-layer overrides (same pattern as CINESORT_BROWSE_ROOTS):
+# CINESORT_LOW_CONFIDENCE / CINESORT_REVIEW_CONFIDENCE, clamped to [0, 1];
+# unparseable values fall back to the defaults.
+def _threshold_env(name: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, v))
+
+
+LOW_CONFIDENCE_THRESHOLD = _threshold_env("CINESORT_LOW_CONFIDENCE", 0.4)
+REVIEW_CONFIDENCE_THRESHOLD = _threshold_env("CINESORT_REVIEW_CONFIDENCE", 0.6)
 
 
 def _query_variants(name: str, year: Optional[int]) -> list[tuple[str, Optional[int]]]:
@@ -1556,6 +1570,10 @@ async def get_settings():
         "omdb_enabled": omdb.enabled,
         # Metadata language (not a secret — safe to echo back for the UI field)
         "tmdb_language": os.environ.get("TMDB_LANGUAGE", ""),
+        # Confidence thresholds — the frontend adopts these at startup so all
+        # build targets share one gate (see LOW_CONFIDENCE_THRESHOLD above).
+        "low_confidence": LOW_CONFIDENCE_THRESHOLD,
+        "review_confidence": REVIEW_CONFIDENCE_THRESHOLD,
     }
 
 

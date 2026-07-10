@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.3.3-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.4-green.svg)
 
 ---
 
@@ -101,20 +101,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.3_amd64.deb # arm64: cinesort_1.3.3_arm64.deb
+sudo dpkg -i cinesort_1.3.4_amd64.deb # arm64: cinesort_1.3.4_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.3.x86_64.rpm # arm64: cinesort-1.3.3.aarch64.rpm
+sudo dnf install ./cinesort-1.3.4.x86_64.rpm # arm64: cinesort-1.3.4.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.3.AppImage # arm64: CineSort-1.3.3-arm64.AppImage
-./CineSort-1.3.3.AppImage
+chmod +x CineSort-1.3.4.AppImage # arm64: CineSort-1.3.4-arm64.AppImage
+./CineSort-1.3.4.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -516,6 +516,10 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.3.4
+- **One-click update download (desktop)** — the update notice in Settings is now a button that downloads the correct package for your install (deb/rpm/AppImage, x86_64/arm64 — auto-detected) to your Downloads folder with live progress, verifies its size **and sha256 checksum** against the GitHub release, makes AppImages executable, opens your file manager on the file, and shows the exact install command. Downloads are restricted to GitHub hosts; nothing auto-installs.
+- **Releases on GitHub link** — the Settings footer always links to the releases page (up-to-date or not, on every platform) for release notes and manual downloads.
 
 ### v1.3.3
 - **Configurable confidence gates** — the review (0.6) and auto-select (0.4) thresholds now live in the backend only and are served to the UI at startup, so all build targets share one source of truth. Override per deployment with `CINESORT_REVIEW_CONFIDENCE` / `CINESORT_LOW_CONFIDENCE` (0-1, clamped) — e.g. demand 0.8+ confidence before anything counts as a safe match.

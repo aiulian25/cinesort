@@ -108,6 +108,69 @@ ipcMain.handle("shell:showItem", (_evt, fullPath) => {
     shell.showItemInFolder(fullPath);
     return true;
 });
+
+// ── Update download (desktop builds only) ─────────────────────────────────────
+// One click in Settings downloads the CORRECT package for this install —
+// deb/rpm/AppImage × x64/arm64 — to ~/Downloads, verifies size + sha256, and
+// reveals it in the file manager. Deliberately NOT auto-installing: deb/rpm
+// need root, and prompting for privilege escalation from an auto-updater is a
+// worse security posture than handing the user a verified file.
+//
+// Trust model: the renderer passes NO arguments. Asset names/URLs/digests come
+// from our own backend (/api/version → GitHub API), and updater.js refuses
+// non-GitHub download hosts — a compromised renderer can trigger a download
+// but can never choose what or from where.
+const { pickAsset, downloadAsset } = require("./updater");
+
+function detectPackageType() {
+    // AppImage runtime always sets $APPIMAGE (see installDesktopEntry below).
+    if (process.env.APPIMAGE) return "appimage";
+    // deb/rpm installs register the "cinesort" package with their manager.
+    try { execFileSync("dpkg", ["-s", "cinesort"], { stdio: "ignore" }); return "deb"; } catch {}
+    try { execFileSync("rpm", ["-q", "cinesort"], { stdio: "ignore" }); return "rpm"; } catch {}
+    // Unpackaged (dev run, manual extract): AppImage is the universal fallback.
+    return "appimage";
+}
+
+ipcMain.handle("update:download", async (evt) => {
+    try {
+        // Ask our own backend (cached GitHub check) — never the renderer.
+        const info = await new Promise((resolve, reject) => {
+            http.get(`http://127.0.0.1:${PORT}/api/version`, res => {
+                let body = "";
+                res.on("data", d => { body += d; });
+                res.on("end", () => {
+                    try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+                });
+            }).on("error", reject);
+        });
+        if (!info || !info.update) return { ok: false, error: "No update available." };
+
+        const pkgType = detectPackageType();
+        const arch = process.arch === "arm64" ? "arm64" : "x64";
+        const asset = pickAsset(info.update.assets || [], pkgType, arch);
+        if (!asset) {
+            return { ok: false, error: `Release v${info.update.latest} has no ${pkgType} package for ${arch}.` };
+        }
+
+        const dest = path.join(app.getPath("downloads"), asset.name);
+        await downloadAsset(asset.url, dest, {
+            expectedSize: asset.size,
+            digest: asset.digest,
+            onProgress: pct => evt.sender.send("update:download-progress", pct),
+        });
+
+        // AppImages must be executable; the app's own first-launch staging
+        // (installDesktopEntry) takes over from there.
+        if (pkgType === "appimage") fs.chmodSync(dest, 0o755);
+
+        shell.showItemInFolder(dest);
+        return { ok: true, name: asset.name, file: dest, pkgType, latest: info.update.latest };
+    } catch (err) {
+        console.error("[main] update download failed:", err.message);
+        return { ok: false, error: err.message };
+    }
+});
 // ─────────────────────────────────────────────────────────────────────────────
 
 function getIconPath() {

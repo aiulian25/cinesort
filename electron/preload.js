@@ -21,4 +21,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
             return "";
         }
     },
+    // One-click update download (Settings). The main process picks the right
+    // deb/rpm/AppImage for this install, verifies size + sha256, saves to
+    // ~/Downloads and reveals it. Resolves {ok, name, file, pkgType} or
+    // {ok:false, error}. Takes no arguments by design — the renderer cannot
+    // influence what is downloaded or from where.
+    downloadUpdate: () => ipcRenderer.invoke("update:download"),
+    // Download progress callback (0-100). Re-registering replaces the previous
+    // listener so reopening Settings can't stack duplicates.
+    onUpdateProgress: (cb) => {
+        ipcRenderer.removeAllListeners("update:download-progress");
+        ipcRenderer.on("update:download-progress", (_evt, pct) => cb(pct));
+    },
 });

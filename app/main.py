@@ -53,7 +53,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.3.3")
+app = FastAPI(title="CineSort", version="1.3.4")
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1487,6 +1487,20 @@ async def _check_update() -> Optional[dict]:
                 "latest": latest,
                 "url": data.get("html_url")
                        or "https://github.com/aiulian25/cinesort/releases",
+                # Asset list so the desktop shell can auto-download the right
+                # package (type+arch) instead of sending users to the release
+                # page. size + sha256 digest let the downloader verify
+                # integrity end-to-end.
+                "assets": [
+                    {
+                        "name": a.get("name"),
+                        "url": a.get("browser_download_url"),
+                        "size": a.get("size"),
+                        "digest": a.get("digest"),
+                    }
+                    for a in (data.get("assets") or [])
+                    if a.get("name") and a.get("browser_download_url")
+                ],
             }
     except Exception:
         pass   # best-effort: no update info beats a slow/failing Settings modal

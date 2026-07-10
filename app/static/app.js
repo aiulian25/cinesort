@@ -1375,21 +1375,62 @@ async function showSettings() {
         <p id="settings-version" style="font-size:11px;margin-top:4px;color:var(--txt3)"></p>`;
 
     // Version + update notice (best-effort; the modal works without it).
-    // Same endpoint on every build target — only the "how to update" wording
-    // differs, chosen client-side: desktop links the release page, Docker
-    // shows the pull command.
+    // One shared endpoint on every build target; only the "how to update"
+    // affordance differs, chosen client-side:
+    //   desktop  → one-click verified download of the RIGHT package for this
+    //              install (deb/rpm/AppImage × arch), via the main process
+    //   Docker   → the pull command
+    //   both     → a "Releases on GitHub" link for technical users
     api("/api/version").then(v => {
         const el = $id("settings-version");
         if (!el || !v || !v.version) return;
+        const relUrl = (v.update && v.update.url) || "https://github.com/aiulian25/cinesort/releases";
+        const relLink = `<a href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">Releases on GitHub</a>`;
+        const canAutoDl = isElectron && window.electronAPI
+            && typeof window.electronAPI.downloadUpdate === "function";
+
         let html = `CineSort v${esc(v.version)}`;
         if (v.update && v.update.latest) {
-            html += isElectron
-                ? ` · <a href="${esc(v.update.url || "https://github.com/aiulian25/cinesort/releases")}"
-                       target="_blank" rel="noopener noreferrer">Update available: v${esc(v.update.latest)}</a>`
-                : ` · Update available: v${esc(v.update.latest)} — run:
-                    <code>docker compose pull &amp;&amp; docker compose up -d</code>`;
+            if (canAutoDl) {
+                html += ` · <button type="button" class="banner-link" id="btn-dl-update">
+                              Download update: v${esc(v.update.latest)}</button> · ${relLink}
+                          <span id="update-dl-status" style="display:block;margin-top:4px;min-height:14px"></span>`;
+            } else if (isElectron) {
+                // Older preload without downloadUpdate — keep the plain link.
+                html += ` · <a href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">Update available: v${esc(v.update.latest)}</a>`;
+            } else {
+                html += ` · Update available: v${esc(v.update.latest)} — run:
+                          <code>docker compose pull &amp;&amp; docker compose up -d</code> · ${relLink}`;
+            }
+        } else {
+            html += ` · up to date · ${relLink}`;
         }
         el.innerHTML = html;
+
+        const btn = $id("btn-dl-update");
+        if (btn) btn.addEventListener("click", async () => {
+            const st = $id("update-dl-status");
+            btn.disabled = true;
+            st.style.color = "var(--txt3)";
+            st.textContent = "Starting download…";
+            window.electronAPI.onUpdateProgress(pct => {
+                st.textContent = `Downloading… ${pct}%`;
+            });
+            const r = await window.electronAPI.downloadUpdate();
+            if (r && r.ok) {
+                const hint = r.pkgType === "deb"
+                    ? `Install it with: sudo apt install ./Downloads/${r.name}`
+                    : r.pkgType === "rpm"
+                    ? `Install it with: sudo dnf install ./Downloads/${r.name}`
+                    : "It is already executable — double-click to run the new version.";
+                st.style.color = "var(--green)";
+                st.textContent = `Verified and saved ${r.name} to your Downloads folder (opened in your file manager). ${hint}`;
+            } else {
+                st.style.color = "var(--red)";
+                st.textContent = "Download failed: " + ((r && r.error) || "unknown error");
+                btn.disabled = false;   // let the user retry
+            }
+        });
     }).catch(() => { /* version line stays empty — non-fatal */ });
 
     // Theme picker — applies instantly and persists.

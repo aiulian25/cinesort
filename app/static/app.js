@@ -1407,28 +1407,72 @@ async function showSettings() {
         }
         el.innerHTML = html;
 
+        // Two-phase button: Download update → Install update. The install
+        // phase only appears when the main process confirmed it can finish
+        // the job (canInstall: pkexec present, or AppImage). Older mains /
+        // missing pkexec keep the verified-file-plus-command fallback.
         const btn = $id("btn-dl-update");
+        const canInstallApi = canAutoDl && typeof window.electronAPI.installUpdate === "function";
+        let updPhase = "download";
         if (btn) btn.addEventListener("click", async () => {
             const st = $id("update-dl-status");
             btn.disabled = true;
             st.style.color = "var(--txt3)";
-            st.textContent = "Starting download…";
-            window.electronAPI.onUpdateProgress(pct => {
-                st.textContent = `Downloading… ${pct}%`;
-            });
-            const r = await window.electronAPI.downloadUpdate();
-            if (r && r.ok) {
-                const hint = r.pkgType === "deb"
-                    ? `Install it with: sudo apt install ./Downloads/${r.name}`
-                    : r.pkgType === "rpm"
-                    ? `Install it with: sudo dnf install ./Downloads/${r.name}`
-                    : "It is already executable — double-click to run the new version.";
+
+            if (updPhase === "download") {
+                st.textContent = "Starting download…";
+                window.electronAPI.onUpdateProgress(pct => {
+                    st.textContent = `Downloading… ${pct}%`;
+                });
+                const r = await window.electronAPI.downloadUpdate();
+                if (r && r.ok && r.canInstall && canInstallApi) {
+                    updPhase = "install";
+                    btn.textContent = `Install update: v${r.latest || v.update.latest}`;
+                    btn.disabled = false;
+                    st.style.color = "var(--green)";
+                    st.textContent = r.pkgType === "appimage"
+                        ? `Downloaded and verified ${r.name}. Click Install update — it replaces the app in place, no password needed.`
+                        : `Downloaded and verified ${r.name}. Click Install update — your system will ask for your password.`;
+                } else if (r && r.ok) {
+                    const hint = r.pkgType === "deb"
+                        ? `Install it with: sudo apt install ./Downloads/${r.name}`
+                        : r.pkgType === "rpm"
+                        ? `Install it with: sudo dnf install ./Downloads/${r.name}`
+                        : "It is already executable — double-click to run the new version.";
+                    st.style.color = "var(--green)";
+                    st.textContent = `Verified and saved ${r.name} to your Downloads folder (opened in your file manager). ${hint}`;
+                } else {
+                    st.style.color = "var(--red)";
+                    st.textContent = "Download failed: " + ((r && r.error) || "unknown error");
+                    btn.disabled = false;   // let the user retry
+                }
+                return;
+            }
+
+            // updPhase === "install"
+            st.textContent = "Installing… approve the system prompt if it appears.";
+            const r = await window.electronAPI.installUpdate();
+            if (r && r.ok && r.relaunching) {
+                // AppImage handover: the new version is starting and this
+                // instance is quitting.
                 st.style.color = "var(--green)";
-                st.textContent = `Verified and saved ${r.name} to your Downloads folder (opened in your file manager). ${hint}`;
+                st.textContent = "Starting the new version…";
+                return;
+            }
+            if (r && r.ok) {
+                // Installed on disk; the main process shows the familiar
+                // "Restart to finish" prompt. Button stays disabled — done.
+                st.style.color = "var(--green)";
+                st.textContent = `Update v${r.latest || v.update.latest} installed — restart CineSort to finish.`;
+            } else if (r && r.cancelled) {
+                st.style.color = "var(--txt3)";
+                st.textContent = "Authorization was cancelled — nothing was changed. Click Install update to try again.";
+                btn.disabled = false;
             } else {
                 st.style.color = "var(--red)";
-                st.textContent = "Download failed: " + ((r && r.error) || "unknown error");
-                btn.disabled = false;   // let the user retry
+                st.textContent = "Install failed: " + ((r && r.error) || "unknown error")
+                    + (r && r.name ? ` — the verified package is in your Downloads folder (${r.name}).` : "");
+                btn.disabled = false;   // retry, or install manually
             }
         });
     }).catch(() => { /* version line stays empty — non-fatal */ });

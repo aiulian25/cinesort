@@ -109,18 +109,32 @@ ipcMain.handle("shell:showItem", (_evt, fullPath) => {
     return true;
 });
 
-// ── Update download (desktop builds only) ─────────────────────────────────────
+// ── Update download + install (desktop builds only) ───────────────────────────
 // One click in Settings downloads the CORRECT package for this install —
-// deb/rpm/AppImage × x64/arm64 — to ~/Downloads, verifies size + sha256, and
-// reveals it in the file manager. Deliberately NOT auto-installing: deb/rpm
-// need root, and prompting for privilege escalation from an auto-updater is a
-// worse security posture than handing the user a verified file.
+// deb/rpm/AppImage × x64/arm64 — to ~/Downloads and verifies size + sha256.
+// A second click installs it: deb/rpm through the system package manager under
+// polkit authorization (the user approves in the OS's own dialog; apt/dnf do
+// the actual install — we never run as root ourselves), AppImage by replacing
+// the running file in place (user-owned, no privileges involved).
 //
-// Trust model: the renderer passes NO arguments. Asset names/URLs/digests come
-// from our own backend (/api/version → GitHub API), and updater.js refuses
-// non-GitHub download hosts — a compromised renderer can trigger a download
-// but can never choose what or from where.
-const { pickAsset, downloadAsset } = require("./updater");
+// Trust model: the renderer passes NO arguments to either step. Asset
+// names/URLs/digests come from our own backend (/api/version → GitHub API),
+// updater.js refuses non-GitHub download hosts, and update:install acts only
+// on the file THIS process downloaded and verified (pendingUpdate) — re-hashed
+// immediately before install, so a file swapped in ~/Downloads between the two
+// clicks can never be escalated to the package manager.
+const { pickAsset, downloadAsset, verifyFile } = require("./updater");
+
+// Set only after a fully verified download; the sole thing update:install may act on.
+let pendingUpdate = null;
+let installInFlight = false;
+
+// polkit's pkexec is how the user authorizes the package-manager step. Present
+// on effectively every desktop distro; when absent we fall back to the old
+// "here is the verified file + install command" flow instead of failing later.
+function hasPkexec() {
+    return ["/usr/bin/pkexec", "/usr/local/bin/pkexec", "/bin/pkexec"].some(p => fs.existsSync(p));
+}
 
 function detectPackageType() {
     // AppImage runtime always sets $APPIMAGE (see installDesktopEntry below).
@@ -153,7 +167,10 @@ ipcMain.handle("update:download", async (evt) => {
             return { ok: false, error: `Release v${info.update.latest} has no ${pkgType} package for ${arch}.` };
         }
 
-        const dest = path.join(app.getPath("downloads"), asset.name);
+        // basename(): asset names come from our own GitHub release via the
+        // backend, but a name is still external input — never let it steer
+        // the write path out of ~/Downloads.
+        const dest = path.join(app.getPath("downloads"), path.basename(asset.name));
         await downloadAsset(asset.url, dest, {
             expectedSize: asset.size,
             digest: asset.digest,
@@ -164,11 +181,123 @@ ipcMain.handle("update:download", async (evt) => {
         // (installDesktopEntry) takes over from there.
         if (pkgType === "appimage") fs.chmodSync(dest, 0o755);
 
-        shell.showItemInFolder(dest);
-        return { ok: true, name: asset.name, file: dest, pkgType, latest: info.update.latest };
+        pendingUpdate = {
+            file: dest,
+            name: asset.name,
+            pkgType,
+            latest: info.update.latest,
+            size: asset.size,
+            digest: asset.digest,
+        };
+
+        // AppImage replace-in-place never needs privileges; deb/rpm need
+        // pkexec for the authorized package-manager step. Without it, reveal
+        // the verified file so the manual flow still works.
+        const canInstall = pkgType === "appimage" || hasPkexec();
+        if (!canInstall) shell.showItemInFolder(dest);
+        return { ok: true, name: asset.name, file: dest, pkgType, latest: info.update.latest, canInstall };
     } catch (err) {
         console.error("[main] update download failed:", err.message);
         return { ok: false, error: err.message };
+    }
+});
+
+// ── Update install ────────────────────────────────────────────────────────────
+// Second click of the Settings button. Takes no renderer arguments by design
+// (see trust model above).
+ipcMain.handle("update:install", async () => {
+    if (installInFlight) return { ok: false, error: "An install is already in progress." };
+    if (!pendingUpdate) return { ok: false, error: "No verified update download to install. Download the update first." };
+    installInFlight = true;
+    const { file, name, pkgType, latest, size, digest } = pendingUpdate;
+    try {
+        // TOCTOU guard: re-verify against the release digest right before use.
+        await verifyFile(file, { expectedSize: size, digest });
+
+        if (pkgType === "appimage") {
+            // Replace the file this install actually runs from ($APPIMAGE).
+            // Copy-then-rename is atomic, so the menu entry never points at a
+            // half-written image; the new version's first launch re-stages
+            // ~/.local/bin and the desktop entry by itself. Unpackaged
+            // fallback (no $APPIMAGE): just start the downloaded file.
+            const target = process.env.APPIMAGE || file;
+            if (target !== file) {
+                const staged = target + ".new";
+                fs.copyFileSync(file, staged);
+                fs.chmodSync(staged, 0o755);
+                fs.renameSync(staged, target);
+            }
+            pendingUpdate = null;
+            const r = mainWindow ? await dialog.showMessageBox(mainWindow, {
+                type: "info",
+                title: "Update installed",
+                message: `CineSort v${latest} is installed.`,
+                detail: "Restart to finish the update.",
+                buttons: ["Restart now", "Later"],
+                defaultId: 0,
+                cancelId: 1,
+            }) : { response: 1 };
+            if (r.response === 0) {
+                spawn(target, [], {
+                    detached: true,
+                    stdio: "ignore",
+                    // extract-and-run works even where FUSE2 is unavailable
+                    // (same reason the .desktop entry sets it).
+                    env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: "1" },
+                }).unref();
+                app.quit();
+                return { ok: true, installed: true, pkgType, latest, relaunching: true };
+            }
+            return { ok: true, installed: true, pkgType, latest };
+        }
+
+        // deb/rpm: the distro's own package manager does the install, under
+        // polkit authorization. pkexec resolves the command on its hardened
+        // PATH; the only argument we add is the re-verified absolute path.
+        const cmd = pkgType === "deb"
+            ? ["apt-get", "install", "-y", file]
+            : fs.existsSync("/usr/bin/dnf")
+            ? ["dnf", "install", "-y", file]
+            : fs.existsSync("/usr/bin/zypper")
+            ? ["zypper", "--non-interactive", "install", "--allow-unsigned-rpm", file]
+            : ["rpm", "-U", file];
+
+        const res = await new Promise((resolve, reject) => {
+            const p = spawn("pkexec", cmd, { stdio: ["ignore", "ignore", "pipe"] });
+            let err = "";
+            p.stderr.on("data", d => { err += d; });
+            p.on("error", reject);
+            // Generous guard so a wedged dpkg/rpm lock can't hang the promise
+            // forever; polkit's own auth dialog timeout is far shorter.
+            const timer = setTimeout(() => {
+                p.kill();
+                reject(new Error("Install timed out after 10 minutes"));
+            }, 10 * 60_000);
+            p.on("exit", code => { clearTimeout(timer); resolve({ code, err: err.trim() }); });
+        });
+
+        // pkexec: 126 = user dismissed the auth dialog, 127 = not authorized.
+        if (res.code === 126 || res.code === 127) {
+            return { ok: false, cancelled: true, name, pkgType,
+                     error: "Authorization was not granted — nothing was installed." };
+        }
+        if (res.code !== 0) {
+            // Hand the user the verified file for a manual install.
+            shell.showItemInFolder(file);
+            const tail = res.err.split("\n").filter(Boolean).pop() || `exit ${res.code}`;
+            return { ok: false, name, file, pkgType, error: `${cmd[0]} failed: ${tail}` };
+        }
+
+        pendingUpdate = null;
+        // The focus/interval watcher would notice within a minute; fire the
+        // familiar "Restart to finish" prompt right away instead.
+        setImmediate(checkInstalledVersionChanged);
+        return { ok: true, installed: true, pkgType, latest };
+    } catch (err) {
+        console.error("[main] update install failed:", err.message);
+        return { ok: false, error: err.message, name, pkgType };
+    } finally {
+        installInFlight = false;
     }
 });
 // ─────────────────────────────────────────────────────────────────────────────
@@ -452,6 +581,49 @@ async function findOrCreatePython() {
     return { python: userPython, firstRun: true };
 }
 
+// ── Restart-to-finish-update prompt (deb/rpm) ─────────────────────────────────
+// A package upgrade replaces /opt/CineSort under the RUNNING process: the old
+// code keeps running until relaunch, which looks like "the update did
+// nothing". Detect it by re-reading the installed package.json (fresh from
+// disk) and comparing to the version this process started with; when they
+// differ, offer a restart. Checked on window focus (the natural moment —
+// the user just came back from the package manager) plus a slow timer.
+// AppImage upgrades don't replace files under us (the instant-switch prompt
+// in update:download covers them), but the check is harmless there too.
+let updatePromptShown = false;
+
+function installedVersion() {
+    try {
+        const pkg = JSON.parse(fs.readFileSync(
+            path.join(process.resourcesPath, "app", "package.json"), "utf8"));
+        return pkg.version || null;
+    } catch {
+        // Dev run (no packaged resources) or a half-written file mid-upgrade —
+        // try again on the next check.
+        return null;
+    }
+}
+
+async function checkInstalledVersionChanged() {
+    if (updatePromptShown || !mainWindow) return;
+    const disk = installedVersion();
+    if (!disk || disk === app.getVersion()) return;
+    updatePromptShown = true;   // ask once per session; "Later" isn't nagged
+    const r = await dialog.showMessageBox(mainWindow, {
+        type: "info",
+        title: "Update installed",
+        message: `CineSort v${disk} is installed — this window is still running v${app.getVersion()}.`,
+        detail: "Restart to finish the update.",
+        buttons: ["Restart now", "Later"],
+        defaultId: 0,
+        cancelId: 1,
+    });
+    if (r.response === 0) {
+        app.relaunch();   // re-executes /opt/CineSort/cinesort — now the new build
+        app.quit();
+    }
+}
+
 function findCwd() {
     const packaged = path.join(process.resourcesPath, "app");
     const dev = path.join(__dirname, "..");
@@ -707,6 +879,10 @@ app.whenReady().then(async () => {
     mainWindow.on("closed", () => {
         mainWindow = null;
     });
+
+    // Restart-to-finish-update watcher (see checkInstalledVersionChanged).
+    mainWindow.on("focus", checkInstalledVersionChanged);
+    setInterval(checkInstalledVersionChanged, 60_000);
 });
 
 app.on("window-all-closed", () => {

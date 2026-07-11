@@ -128,4 +128,33 @@ function downloadAsset(url, dest, { expectedSize, digest, onProgress } = {}, red
     });
 }
 
-module.exports = { pickAsset, downloadAsset, SUFFIX, ALLOWED_HOSTS };
+/** Re-verify an already-downloaded file (size + sha256) by streaming it —
+ *  never loads it into memory. Called immediately before install to close the
+ *  window between download-time verification and install-time use: a file
+ *  swapped in ~/Downloads after the download can never reach the package
+ *  manager. Resolves to `file`, rejects on any mismatch. */
+function verifyFile(file, { expectedSize, digest } = {}) {
+    return new Promise((resolve, reject) => {
+        let st;
+        try { st = fs.statSync(file); }
+        catch { return reject(new Error("Downloaded update is no longer there — download it again")); }
+        if (expectedSize && st.size !== expectedSize) {
+            return reject(new Error("File size changed since download — refusing to install it"));
+        }
+        const want = String(digest || "").replace(/^sha256:/, "").toLowerCase();
+        if (!want) return resolve(file);
+        const hash = crypto.createHash("sha256");
+        const s = fs.createReadStream(file);
+        s.on("data", c => hash.update(c));
+        s.on("error", reject);
+        s.on("end", () => {
+            if (hash.digest("hex") !== want) {
+                reject(new Error("File checksum changed since download — refusing to install it"));
+            } else {
+                resolve(file);
+            }
+        });
+    });
+}
+
+module.exports = { pickAsset, downloadAsset, verifyFile, SUFFIX, ALLOWED_HOSTS };

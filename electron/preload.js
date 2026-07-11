@@ -27,6 +27,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     // {ok:false, error}. Takes no arguments by design — the renderer cannot
     // influence what is downloaded or from where.
     downloadUpdate: () => ipcRenderer.invoke("update:download"),
+    // Install the update downloadUpdate() verified. deb/rpm go through the
+    // system package manager under polkit authorization; AppImage is replaced
+    // in place. Takes no arguments by design — the main process only installs
+    // the file it downloaded itself, re-hashed immediately before install.
+    installUpdate: () => ipcRenderer.invoke("update:install"),
     // Download progress callback (0-100). Re-registering replaces the previous
     // listener so reopening Settings can't stack duplicates.
     onUpdateProgress: (cb) => {

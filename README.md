@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.3.5-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.6-green.svg)
 
 ---
 
@@ -102,20 +102,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.5_amd64.deb # arm64: cinesort_1.3.5_arm64.deb
+sudo dpkg -i cinesort_1.3.6_amd64.deb # arm64: cinesort_1.3.6_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.5.x86_64.rpm # arm64: cinesort-1.3.5.aarch64.rpm
+sudo dnf install ./cinesort-1.3.6.x86_64.rpm # arm64: cinesort-1.3.6.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.5.AppImage # arm64: CineSort-1.3.5-arm64.AppImage
-./CineSort-1.3.5.AppImage
+chmod +x CineSort-1.3.6.AppImage # arm64: CineSort-1.3.6-arm64.AppImage
+./CineSort-1.3.6.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -517,6 +517,9 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.3.6
+- **Resilient metadata fetches** — TMDb, TVmaze, and OMDb requests now retry exactly once on a rate limit (HTTP 429, honoring the provider's `Retry-After`, capped at 5 s) or a network timeout, so one transient blip no longer fails a whole match group. Real errors (revoked key, not found) still fail fast and are reported exactly as before. MusicBrainz is deliberately excluded — its client already rate-limits itself to 1 request/s per MusicBrainz policy.
 
 ### v1.3.5
 - **Install updates without a terminal (desktop)** — after **Download update**, the button becomes **Install update**: deb/rpm are installed through your system's native authorization dialog (polkit) — you approve with your password, `apt`/`dnf`/`zypper` do the actual install; AppImages are replaced in place, no privileges needed. The downloaded file is re-verified (size + sha256) immediately before install, and the app never runs as root itself. If authorization is cancelled, nothing changes and you can retry; if polkit is unavailable, the verified file + install command are provided as before.

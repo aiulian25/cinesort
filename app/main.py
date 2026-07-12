@@ -44,6 +44,7 @@ from app.api.tmdb import TMDbClient
 from app.api.tvmaze import TVMazeClient
 from app.api.omdb import OMDbClient
 from app.api.musicbrainz import MusicBrainzClient
+from app.api.retry import with_retry
 from datetime import datetime
 import uuid
 
@@ -53,7 +54,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.3.5")
+app = FastAPI(title="CineSort", version="1.3.6")
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -595,7 +596,9 @@ async def _cascade_search(search_coro, query: str, year: Optional[int]):
     errors: list[str] = []
     for q, y in _query_variants(query, year):
         try:
-            results = await search_coro(q, y)
+            # One transparent retry for rate limits / timeouts (retry.py) —
+            # a single blip no longer burns this variant.
+            results = await with_retry(lambda: search_coro(q, y))
         except Exception as exc:   # pragma: no cover - defensive
             # Sanitized in the log too — docker logs get shared in bug reports.
             print(f"[WARN] search failed for {q!r}: {_sanitize_error(exc)}")
@@ -807,10 +810,10 @@ async def _match_files_impl(req: MatchRequest):
             if req.selected_show_id and req.selected_show_name:
                 # Use the pre-selected show
                 if req.datasource == "tvmaze":
-                    show_details = await tvmaze.get_show(req.selected_show_id)
+                    show_details = await with_retry(lambda: tvmaze.get_show(req.selected_show_id))
                     show_data = {"id": show_details.id, "name": show_details.name, "year": show_details.year, "poster": show_details.image_url}
                     try:
-                        eps = await tvmaze.get_episodes(req.selected_show_id)
+                        eps = await with_retry(lambda: tvmaze.get_episodes(req.selected_show_id))
                     except Exception as exc:
                         episodes_fetch_error = _sanitize_error(exc)
                         eps = []
@@ -819,13 +822,13 @@ async def _match_files_impl(req: MatchRequest):
                         for e in eps
                     ]
                 else:
-                    show_details = await tmdb.get_tv_details(req.selected_show_id)
+                    show_details = await with_retry(lambda: tmdb.get_tv_details(req.selected_show_id))
                     show_data = {"id": req.selected_show_id, "name": show_details.get("name"), "year": show_details.get("first_air_date", "")[:4] if show_details.get("first_air_date") else None, "poster": f"https://image.tmdb.org/t/p/w154{show_details.get('poster_path')}" if show_details.get("poster_path") else None}
                     seasons = show_details.get("seasons", [])
                     for s in seasons:
                         sn = s.get("season_number", 0)
                         try:
-                            eps = await tmdb.get_tv_season(req.selected_show_id, sn)
+                            eps = await with_retry(lambda: tmdb.get_tv_season(req.selected_show_id, sn))
                             episodes_data.extend([
                                 {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
                                 for e in eps
@@ -857,7 +860,7 @@ async def _match_files_impl(req: MatchRequest):
                         show = shows[0]
                         show_data = {"id": show.id, "name": show.name, "year": show.year, "poster": show.image_url}
                         try:
-                            eps = await tvmaze.get_episodes(show.id)
+                            eps = await with_retry(lambda: tvmaze.get_episodes(show.id))
                         except Exception as exc:
                             episodes_fetch_error = _sanitize_error(exc)
                             eps = []
@@ -886,12 +889,12 @@ async def _match_files_impl(req: MatchRequest):
                         show = shows[0]
                         show_data = {"id": show.id, "name": show.title, "year": show.year, "poster": show.poster_url_small}
                         # Fetch all seasons
-                        details = await tmdb.get_tv_details(show.id)
+                        details = await with_retry(lambda: tmdb.get_tv_details(show.id))
                         seasons = details.get("seasons", [])
                         for s in seasons:
                             sn = s.get("season_number", 0)
                             try:
-                                eps = await tmdb.get_tv_season(show.id, sn)
+                                eps = await with_retry(lambda: tmdb.get_tv_season(show.id, sn))
                                 episodes_data.extend([
                                     {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
                                     for e in eps

@@ -1322,11 +1322,269 @@ function showRenameResults(data) {
     modalOverlay.classList.remove("hidden");
 }
 
+/* ─── Software update: banner, Settings card, restart prompt ──
+   One state machine feeds three surfaces:
+     - a dismissible banner in the main window (announces a release once),
+     - the "Software update" card in Settings (idle → downloading → ready →
+       installing → done, plus manual-fallback and error states),
+     - a themed in-app restart prompt (replaces the native OS dialog, whose
+       "Restart now" read like a system reboot).
+   The underlying trust model is untouched: the renderer passes no arguments
+   to download/install/restart — the main process owns what happens. */
+let updInfo = null;       // last /api/version payload
+let updPhase = "idle";    // idle | downloading | ready | manual | installing | done | error
+let updResult = null;     // downloadUpdate() result ({name, pkgType, …})
+let updError = "";
+let updNote = "";         // transient note (e.g. cancelled authorization)
+
+function updCanAutoDl() {
+    return isElectron && window.electronAPI && typeof window.electronAPI.downloadUpdate === "function";
+}
+function updCanInstall() {
+    return isElectron && window.electronAPI && typeof window.electronAPI.installUpdate === "function";
+}
+
+function renderUpdateCard() {
+    const slot = $id("update-card-slot");
+    if (!slot) return;                    // Settings not open — state persists for next open
+    const v = updInfo;
+    if (!v || !v.version) { slot.innerHTML = ""; return; }
+    const upd = v.update;
+    const relUrl = (upd && upd.url) || "https://github.com/aiulian25/cinesort/releases";
+
+    // Up to date — the quiet default.
+    if (!upd || !upd.latest) {
+        slot.innerHTML = `
+            <div class="update-card update-row">
+                <span class="update-chip ok">✓ Up to date</span>
+                <span style="font-weight:650">CineSort v${esc(v.version)}</span>
+                <span class="up-tiny" style="flex:1">checks once per day</span>
+                <a class="up-tiny" href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">Releases on GitHub</a>
+            </div>`;
+        return;
+    }
+
+    const latest = esc(upd.latest);
+    const whatsNew = `<a href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">What's new</a>`;
+
+    // Docker / plain browser: same card, pull command instead of buttons.
+    if (!updCanAutoDl()) {
+        slot.innerHTML = `
+            <div class="update-card highlight">
+                <h4><span class="update-chip new">New</span> CineSort v${latest} is available</h4>
+                <div class="up-muted">You're on v${esc(v.version)} · ${whatsNew}</div>
+                ${isElectron ? "" : `<div class="up-tiny" style="margin-top:6px">Update with: <code>docker compose pull &amp;&amp; docker compose up -d</code></div>`}
+            </div>`;
+        return;
+    }
+
+    let html = "";
+    if (updPhase === "downloading") {
+        html = `
+            <div class="update-card highlight">
+                <h4>Downloading CineSort v${latest}…</h4>
+                <div class="update-bar"><i id="upd-bar-fill"></i></div>
+                <div class="update-row">
+                    <span class="up-muted" id="upd-bytes" style="flex:1;margin-top:0">Starting download… · from github.com</span>
+                    <span class="up-muted" id="upd-pct" style="margin-top:0">0%</span>
+                </div>
+            </div>`;
+    } else if (updPhase === "ready") {
+        const appimage = updResult && updResult.pkgType === "appimage";
+        html = `
+            <div class="update-card highlight">
+                <div class="update-row">
+                    <div style="flex:1;min-width:0">
+                        <h4><span style="color:var(--green)">✓</span> Downloaded and verified</h4>
+                        <div class="up-muted">sha256 checksum matches the GitHub release · <span class="mono">${esc(updResult && updResult.name || "")}</span></div>
+                        <div class="up-tiny">${appimage
+                            ? "Replaced in place — no password needed."
+                            : "Your system will ask for your password — the package manager does the actual install."}</div>
+                        ${updNote ? `<div class="up-tiny" style="color:var(--amber)">${esc(updNote)}</div>` : ""}
+                    </div>
+                    <button class="glass-btn btn-scan" id="btn-upd-install" style="flex-shrink:0">Install update</button>
+                </div>
+            </div>`;
+    } else if (updPhase === "installing") {
+        html = `
+            <div class="update-card highlight">
+                <h4>Installing v${latest}…</h4>
+                <div class="update-bar indet"><i></i></div>
+                <div class="up-muted">Waiting for your authorization, then the package manager installs the update. Nothing runs as root inside CineSort.</div>
+            </div>`;
+    } else if (updPhase === "done") {
+        html = `
+            <div class="update-card highlight">
+                <div class="update-row">
+                    <div style="flex:1">
+                        <h4><span style="color:var(--green)">✓</span> Update v${latest} installed</h4>
+                        <div class="up-muted">Restart CineSort to start using it. Your files, history and settings are untouched.</div>
+                    </div>
+                    <button class="glass-btn btn-scan" id="btn-upd-restart" style="flex-shrink:0">Restart CineSort</button>
+                </div>
+            </div>`;
+    } else if (updPhase === "manual") {
+        const r = updResult || {};
+        const hint = r.pkgType === "deb" ? `sudo apt install ./Downloads/${esc(r.name || "")}`
+                   : r.pkgType === "rpm" ? `sudo dnf install ./Downloads/${esc(r.name || "")}`
+                   : "It is already executable — double-click to run the new version.";
+        html = `
+            <div class="update-card">
+                <h4><span style="color:var(--green)">✓</span> Downloaded and verified</h4>
+                <div class="up-muted">Saved <span class="mono">${esc(r.name || "")}</span> to your Downloads folder (opened in your file manager).</div>
+                <div class="up-tiny">Install it with: <code>${hint}</code></div>
+            </div>`;
+    } else if (updPhase === "error") {
+        html = `
+            <div class="update-card error">
+                <div class="update-row">
+                    <div style="flex:1;min-width:0">
+                        <h4><span style="color:var(--red)">✕</span> Update didn't finish</h4>
+                        <div class="up-muted">${esc(updError || "unknown error")}</div>
+                        ${updResult && updResult.name ? `<div class="up-tiny">The verified package is in your Downloads folder (<span class="mono">${esc(updResult.name)}</span>) if you prefer to install it yourself.</div>` : ""}
+                    </div>
+                    <button class="glass-btn" id="btn-upd-retry" style="flex-shrink:0">Try again</button>
+                </div>
+            </div>`;
+    } else {
+        // idle — update available.
+        html = `
+            <div class="update-card highlight">
+                <div class="update-row">
+                    <div style="flex:1;min-width:0">
+                        <h4><span class="update-chip new">New</span> CineSort v${latest} is available</h4>
+                        <div class="up-muted">You're on v${esc(v.version)} · ${whatsNew} · verified download from GitHub</div>
+                    </div>
+                    <button class="glass-btn btn-scan" id="btn-upd-download" style="flex-shrink:0">Download update</button>
+                </div>
+            </div>`;
+    }
+    slot.innerHTML = html;
+    $id("btn-upd-download")?.addEventListener("click", updDownload);
+    $id("btn-upd-retry")?.addEventListener("click", updDownload);
+    $id("btn-upd-install")?.addEventListener("click", updInstall);
+    $id("btn-upd-restart")?.addEventListener("click", () => {
+        window.electronAPI.restartApp && window.electronAPI.restartApp();
+    });
+}
+
+async function updDownload() {
+    updPhase = "downloading"; updError = ""; updNote = "";
+    renderUpdateCard();
+    window.electronAPI.onUpdateProgress(p => {
+        // {pct, transferred, total} from current mains; bare number from older.
+        const pct = typeof p === "number" ? p : (p && p.pct) || 0;
+        const fill = $id("upd-bar-fill");
+        if (fill) fill.style.width = pct + "%";
+        const lab = $id("upd-pct");
+        if (lab) lab.textContent = pct + "%";
+        const bytes = $id("upd-bytes");
+        if (bytes && p && typeof p === "object" && p.total) {
+            bytes.textContent = `${fmt(p.transferred)} of ${fmt(p.total)} · from github.com`;
+        }
+    });
+    const r = await window.electronAPI.downloadUpdate();
+    updResult = r;
+    if (r && r.ok && r.canInstall && updCanInstall()) updPhase = "ready";
+    else if (r && r.ok) updPhase = "manual";       // no pkexec / older main
+    else { updPhase = "error"; updError = "Download failed: " + ((r && r.error) || "unknown error"); }
+    renderUpdateCard();
+}
+
+async function updInstall() {
+    updPhase = "installing"; updNote = "";
+    renderUpdateCard();
+    const r = await window.electronAPI.installUpdate();
+    if (r && r.ok) {
+        updPhase = "done";      // main also fires the restart prompt
+    } else if (r && r.cancelled) {
+        updPhase = "ready";
+        updNote = "Authorization was cancelled — nothing was changed.";
+    } else {
+        updPhase = "error";
+        updError = "Install failed: " + ((r && r.error) || "unknown error");
+    }
+    renderUpdateCard();
+}
+
+/* Update banner: one quiet row at the top of the main window, shown once
+   per release. Dismiss is remembered per-version — never nags again until
+   the NEXT release. */
+(async function checkUpdateOnStartup() {
+    try {
+        const v = await api("/api/version");
+        if (!v || !v.version) return;
+        updInfo = v;
+        const latest = v.update && v.update.latest;
+        if (!latest) return;
+        if (localStorage.getItem("cinesort.dismissedUpdate") === latest) return;
+        $id("update-banner-title").textContent = `CineSort v${latest} is available`;
+        $id("update-banner-sub").textContent = updCanAutoDl()
+            ? "verified download · installs without a terminal"
+            : (isElectron ? "download from GitHub releases" : "one docker pull away");
+        $id("update-banner").classList.remove("hidden");
+    } catch { /* offline — no banner */ }
+})();
+$id("update-banner-view").addEventListener("click", () => {
+    $id("update-banner").classList.add("hidden");
+    showSettings("update");
+});
+$id("update-banner-dismiss").addEventListener("click", () => {
+    const latest = updInfo && updInfo.update && updInfo.update.latest;
+    if (latest) localStorage.setItem("cinesort.dismissedUpdate", latest);
+    $id("update-banner").classList.add("hidden");
+});
+
+/* In-app restart prompt — replaces the native dialog. Shown when the main
+   process reports an installed update awaiting a restart (deb/rpm upgrade
+   detected on disk, or a replaced AppImage). Asked once; "Restart later"
+   is respected — the Settings card keeps the persistent affordance. */
+function showRestartModal(info) {
+    let overlay = $id("restart-overlay");
+    if (!overlay) {
+        overlay = document.createElement("div");
+        overlay.id = "restart-overlay";
+        overlay.className = "confirm-overlay hidden";
+        document.body.appendChild(overlay);
+    }
+    const spawnMode = info && info.mode === "spawn";
+    const latest = esc((info && info.latest) || "");
+    const running = esc((info && info.running) || "");
+    overlay.innerHTML = `
+        <div class="glass-panel confirm-box restart-box">
+            <div class="restart-head">
+                <img src="/CineSort.png" class="restart-logo" alt="">
+                <div>
+                    <div class="restart-title">${spawnMode ? "Ready to switch" : "Update installed"}</div>
+                    <div class="restart-sub">CineSort v${latest}${spawnMode ? " · AppImage replaced in place" : ""}</div>
+                </div>
+            </div>
+            <div class="restart-body">${spawnMode
+                ? `The new version starts instantly — this window closes and v${latest} opens in its place.`
+                : `v${latest} is ready to go — this window is still running v${running}.`}</div>
+            <div class="restart-fine">Restarting only reopens CineSort. Your files, history and settings are untouched.</div>
+            <div class="restart-actions">
+                <button class="glass-btn" id="restart-later">Restart later</button>
+                <button class="glass-btn btn-scan" id="restart-now">${spawnMode ? `Start CineSort v${latest}` : "Restart CineSort"}</button>
+            </div>
+        </div>`;
+    overlay.classList.remove("hidden");
+    $id("restart-later").addEventListener("click", () => overlay.classList.add("hidden"));
+    $id("restart-now").addEventListener("click", () => {
+        $id("restart-now").disabled = true;
+        window.electronAPI.restartApp && window.electronAPI.restartApp();
+    });
+    overlay.addEventListener("click", e => { if (e.target === overlay) overlay.classList.add("hidden"); });
+}
+if (isElectron && window.electronAPI && typeof window.electronAPI.onUpdateRestartPending === "function") {
+    window.electronAPI.onUpdateRestartPending(showRestartModal);
+}
+
 /* ─── Settings ────────────────────────────────────────────── */
 const btnSettings = $id("btn-settings");
-btnSettings.addEventListener("click", showSettings);
+btnSettings.addEventListener("click", () => showSettings());
 
-async function showSettings() {
+async function showSettings(scrollTo) {
     modalTitle.textContent = "Settings";
     modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:var(--txt3)">Loading…</div>`;
     modalOverlay.classList.remove("hidden");
@@ -1417,6 +1675,8 @@ async function showSettings() {
                    maxlength="5" autocomplete="off" spellcheck="false">
         </div>
 
+        <div id="update-card-slot"></div>
+
         <div style="display:flex;gap:8px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
             <button class="glass-btn" onclick="R.closeModal()" style="flex:1">Cancel</button>
             <button class="glass-btn btn-scan" id="settings-save" style="flex:2">Save &amp; Apply</button>
@@ -1424,107 +1684,22 @@ async function showSettings() {
         <p id="settings-msg" style="font-size:11px;margin-top:10px;min-height:16px"></p>
         <p id="settings-version" style="font-size:11px;margin-top:4px;color:var(--txt3)"></p>`;
 
-    // Version + update notice (best-effort; the modal works without it).
-    // One shared endpoint on every build target; only the "how to update"
-    // affordance differs, chosen client-side:
-    //   desktop  → one-click verified download of the RIGHT package for this
-    //              install (deb/rpm/AppImage × arch), via the main process
-    //   Docker   → the pull command
-    //   both     → a "Releases on GitHub" link for technical users
+    // Software update card + version footer (best-effort; the modal works
+    // without it). One shared endpoint on every build target; only the
+    // affordance differs: desktop gets the download+install flow, Docker/
+    // browser gets the pull command. States live in renderUpdateCard().
     api("/api/version").then(v => {
+        if (!v || !v.version) return;
+        updInfo = v;
+        renderUpdateCard();
         const el = $id("settings-version");
-        if (!el || !v || !v.version) return;
-        const relUrl = (v.update && v.update.url) || "https://github.com/aiulian25/cinesort/releases";
-        const relLink = `<a href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">Releases on GitHub</a>`;
-        const canAutoDl = isElectron && window.electronAPI
-            && typeof window.electronAPI.downloadUpdate === "function";
-
-        let html = `CineSort v${esc(v.version)}`;
-        if (v.update && v.update.latest) {
-            if (canAutoDl) {
-                html += ` · <button type="button" class="banner-link" id="btn-dl-update">
-                              Download update: v${esc(v.update.latest)}</button> · ${relLink}
-                          <span id="update-dl-status" style="display:block;margin-top:4px;min-height:14px"></span>`;
-            } else if (isElectron) {
-                // Older preload without downloadUpdate — keep the plain link.
-                html += ` · <a href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">Update available: v${esc(v.update.latest)}</a>`;
-            } else {
-                html += ` · Update available: v${esc(v.update.latest)} — run:
-                          <code>docker compose pull &amp;&amp; docker compose up -d</code> · ${relLink}`;
-            }
-        } else {
-            html += ` · up to date · ${relLink}`;
+        if (el) {
+            const relUrl = (v.update && v.update.url) || "https://github.com/aiulian25/cinesort/releases";
+            el.innerHTML = `CineSort v${esc(v.version)} · <a href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">Releases on GitHub</a>`;
         }
-        el.innerHTML = html;
-
-        // Two-phase button: Download update → Install update. The install
-        // phase only appears when the main process confirmed it can finish
-        // the job (canInstall: pkexec present, or AppImage). Older mains /
-        // missing pkexec keep the verified-file-plus-command fallback.
-        const btn = $id("btn-dl-update");
-        const canInstallApi = canAutoDl && typeof window.electronAPI.installUpdate === "function";
-        let updPhase = "download";
-        if (btn) btn.addEventListener("click", async () => {
-            const st = $id("update-dl-status");
-            btn.disabled = true;
-            st.style.color = "var(--txt3)";
-
-            if (updPhase === "download") {
-                st.textContent = "Starting download…";
-                window.electronAPI.onUpdateProgress(pct => {
-                    st.textContent = `Downloading… ${pct}%`;
-                });
-                const r = await window.electronAPI.downloadUpdate();
-                if (r && r.ok && r.canInstall && canInstallApi) {
-                    updPhase = "install";
-                    btn.textContent = `Install update: v${r.latest || v.update.latest}`;
-                    btn.disabled = false;
-                    st.style.color = "var(--green)";
-                    st.textContent = r.pkgType === "appimage"
-                        ? `Downloaded and verified ${r.name}. Click Install update — it replaces the app in place, no password needed.`
-                        : `Downloaded and verified ${r.name}. Click Install update — your system will ask for your password.`;
-                } else if (r && r.ok) {
-                    const hint = r.pkgType === "deb"
-                        ? `Install it with: sudo apt install ./Downloads/${r.name}`
-                        : r.pkgType === "rpm"
-                        ? `Install it with: sudo dnf install ./Downloads/${r.name}`
-                        : "It is already executable — double-click to run the new version.";
-                    st.style.color = "var(--green)";
-                    st.textContent = `Verified and saved ${r.name} to your Downloads folder (opened in your file manager). ${hint}`;
-                } else {
-                    st.style.color = "var(--red)";
-                    st.textContent = "Download failed: " + ((r && r.error) || "unknown error");
-                    btn.disabled = false;   // let the user retry
-                }
-                return;
-            }
-
-            // updPhase === "install"
-            st.textContent = "Installing… approve the system prompt if it appears.";
-            const r = await window.electronAPI.installUpdate();
-            if (r && r.ok && r.relaunching) {
-                // AppImage handover: the new version is starting and this
-                // instance is quitting.
-                st.style.color = "var(--green)";
-                st.textContent = "Starting the new version…";
-                return;
-            }
-            if (r && r.ok) {
-                // Installed on disk; the main process shows the familiar
-                // "Restart to finish" prompt. Button stays disabled — done.
-                st.style.color = "var(--green)";
-                st.textContent = `Update v${r.latest || v.update.latest} installed — restart CineSort to finish.`;
-            } else if (r && r.cancelled) {
-                st.style.color = "var(--txt3)";
-                st.textContent = "Authorization was cancelled — nothing was changed. Click Install update to try again.";
-                btn.disabled = false;
-            } else {
-                st.style.color = "var(--red)";
-                st.textContent = "Install failed: " + ((r && r.error) || "unknown error")
-                    + (r && r.name ? ` — the verified package is in your Downloads folder (${r.name}).` : "");
-                btn.disabled = false;   // retry, or install manually
-            }
-        });
+        if (scrollTo === "update") {
+            $id("update-card-slot")?.scrollIntoView({ block: "center" });
+        }
     }).catch(() => { /* version line stays empty — non-fatal */ });
 
     // Theme picker — applies instantly and persists.

@@ -32,10 +32,23 @@ contextBridge.exposeInMainWorld("electronAPI", {
     // in place. Takes no arguments by design — the main process only installs
     // the file it downloaded itself, re-hashed immediately before install.
     installUpdate: () => ipcRenderer.invoke("update:install"),
-    // Download progress callback (0-100). Re-registering replaces the previous
-    // listener so reopening Settings can't stack duplicates.
+    // Download progress callback. Payload is {pct, transferred, total} from
+    // current mains, or a bare 0-100 number from older ones — the UI handles
+    // both. Re-registering replaces the previous listener so reopening
+    // Settings can't stack duplicates.
     onUpdateProgress: (cb) => {
         ipcRenderer.removeAllListeners("update:download-progress");
-        ipcRenderer.on("update:download-progress", (_evt, pct) => cb(pct));
+        ipcRenderer.on("update:download-progress", (_evt, p) => cb(p));
     },
+    // Fired when an installed update awaits a restart (deb/rpm upgrade seen
+    // on disk, or a replaced AppImage). Payload: {latest, running, mode}.
+    // The renderer shows the themed restart prompt.
+    onUpdateRestartPending: (cb) => {
+        ipcRenderer.removeAllListeners("update:restart-pending");
+        ipcRenderer.on("update:restart-pending", (_evt, info) => cb(info));
+    },
+    // Perform the restart a pending update requires. Takes no arguments —
+    // the main process decided relaunch-vs-AppImage-spawn at install time;
+    // the button only expresses consent.
+    restartApp: () => ipcRenderer.invoke("update:restart"),
 });

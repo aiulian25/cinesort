@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.3.7-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.8-green.svg)
 
 ---
 
@@ -102,20 +102,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.7_amd64.deb # arm64: cinesort_1.3.7_arm64.deb
+sudo dpkg -i cinesort_1.3.8_amd64.deb # arm64: cinesort_1.3.8_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.7.x86_64.rpm # arm64: cinesort-1.3.7.aarch64.rpm
+sudo dnf install ./cinesort-1.3.8.x86_64.rpm # arm64: cinesort-1.3.8.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.7.AppImage # arm64: CineSort-1.3.7-arm64.AppImage
-./CineSort-1.3.7.AppImage
+chmod +x CineSort-1.3.8.AppImage # arm64: CineSort-1.3.8-arm64.AppImage
+./CineSort-1.3.8.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -518,6 +518,9 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.3.8
+- **Redesigned update experience** — a quiet dismissible banner announces new releases in the main window (once per version); Settings gains a proper **Software update** card with a real progress bar and byte counts, verification status, and honest error states; and the restart prompt is now an in-app CineSort-themed dialog whose button says **Restart CineSort** — no more OS-looking popup that read like a system reboot. Same two-click flow and identical security model (GitHub-only, sha256-verified, polkit-authorized) underneath.
 
 ### v1.3.7
 - **Provider response cache** — searches and episode lists are cached in memory for 15 minutes, so re-matching the same show (or clicking through a disambiguation) costs zero repeat requests. Tune or disable with `CINESORT_CACHE_TTL` (seconds, `0` = off); cleared automatically when you change keys or language in Settings.

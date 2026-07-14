@@ -88,7 +88,10 @@ function downloadAsset(url, dest, { expectedSize, digest, onProgress } = {}, red
                 hash.update(chunk);
                 if (onProgress && total) {
                     const pct = Math.min(100, Math.round((100 * got) / total));
-                    if (pct !== lastPct) { lastPct = pct; onProgress(pct); }
+                    // Extra args are backward-compatible: old callers that
+                    // only read the pct keep working; the UI uses the byte
+                    // counts for "36 MB of 86 MB".
+                    if (pct !== lastPct) { lastPct = pct; onProgress(pct, got, total); }
                 }
             });
             res.pipe(out);

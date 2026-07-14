@@ -128,6 +128,10 @@ const { pickAsset, downloadAsset, verifyFile } = require("./updater");
 // Set only after a fully verified download; the sole thing update:install may act on.
 let pendingUpdate = null;
 let installInFlight = false;
+// Set once an update is installed on disk and a restart would activate it.
+// update:restart (renderer's "Restart CineSort" button) consumes it — the
+// renderer never chooses HOW to restart, only WHETHER.
+let pendingRestart = null;   // { mode: "relaunch" | "spawn", target?: string, latest: string }
 
 // polkit's pkexec is how the user authorizes the package-manager step. Present
 // on effectively every desktop distro; when absent we fall back to the old
@@ -174,7 +178,10 @@ ipcMain.handle("update:download", async (evt) => {
         await downloadAsset(asset.url, dest, {
             expectedSize: asset.size,
             digest: asset.digest,
-            onProgress: pct => evt.sender.send("update:download-progress", pct),
+            // Object payload so the card can render byte counts; the renderer
+            // also accepts a bare number from older mains.
+            onProgress: (pct, transferred, total) =>
+                evt.sender.send("update:download-progress", { pct, transferred, total }),
         });
 
         // AppImages must be executable; the app's own first-launch staging
@@ -228,27 +235,15 @@ ipcMain.handle("update:install", async () => {
                 fs.renameSync(staged, target);
             }
             pendingUpdate = null;
-            const r = mainWindow ? await dialog.showMessageBox(mainWindow, {
-                type: "info",
-                title: "Update installed",
-                message: `CineSort v${latest} is installed.`,
-                detail: "Restart to finish the update.",
-                buttons: ["Restart now", "Later"],
-                defaultId: 0,
-                cancelId: 1,
-            }) : { response: 1 };
-            if (r.response === 0) {
-                spawn(target, [], {
-                    detached: true,
-                    stdio: "ignore",
-                    // extract-and-run works even where FUSE2 is unavailable
-                    // (same reason the .desktop entry sets it).
-                    env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: "1" },
-                }).unref();
-                app.quit();
-                return { ok: true, installed: true, pkgType, latest, relaunching: true };
+            // The renderer shows the themed "Start CineSort vX" prompt —
+            // no native dialog (looked like an OS message, and "Restart now"
+            // read like a system reboot).
+            pendingRestart = { mode: "spawn", target, latest };
+            if (mainWindow) {
+                mainWindow.webContents.send("update:restart-pending",
+                    { latest, running: app.getVersion(), mode: "spawn" });
             }
-            return { ok: true, installed: true, pkgType, latest };
+            return { ok: true, installed: true, pkgType, latest, restartPending: true };
         }
 
         // deb/rpm: the distro's own package manager does the install, under
@@ -299,6 +294,28 @@ ipcMain.handle("update:install", async () => {
     } finally {
         installInFlight = false;
     }
+});
+
+// ── Update restart ────────────────────────────────────────────────────────────
+// Consumes pendingRestart. Takes no renderer arguments: the renderer's
+// "Restart CineSort" button only expresses consent — what actually happens
+// (app.relaunch vs spawning the replaced AppImage) was decided when the
+// install landed.
+ipcMain.handle("update:restart", () => {
+    if (!pendingRestart) return { ok: false, error: "No update awaiting a restart." };
+    if (pendingRestart.mode === "spawn") {
+        spawn(pendingRestart.target, [], {
+            detached: true,
+            stdio: "ignore",
+            // extract-and-run works even where FUSE2 is unavailable
+            // (same reason the .desktop entry sets it).
+            env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: "1" },
+        }).unref();
+    } else {
+        app.relaunch();   // re-executes /opt/CineSort/cinesort — now the new build
+    }
+    app.quit();
+    return { ok: true };
 });
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -604,24 +621,17 @@ function installedVersion() {
     }
 }
 
-async function checkInstalledVersionChanged() {
+function checkInstalledVersionChanged() {
     if (updatePromptShown || !mainWindow) return;
     const disk = installedVersion();
     if (!disk || disk === app.getVersion()) return;
-    updatePromptShown = true;   // ask once per session; "Later" isn't nagged
-    const r = await dialog.showMessageBox(mainWindow, {
-        type: "info",
-        title: "Update installed",
-        message: `CineSort v${disk} is installed — this window is still running v${app.getVersion()}.`,
-        detail: "Restart to finish the update.",
-        buttons: ["Restart now", "Later"],
-        defaultId: 0,
-        cancelId: 1,
-    });
-    if (r.response === 0) {
-        app.relaunch();   // re-executes /opt/CineSort/cinesort — now the new build
-        app.quit();
-    }
+    updatePromptShown = true;   // announce once per session; "Restart later" isn't nagged
+    // Themed in-app prompt instead of a native dialog — the OS chrome made
+    // "Restart now" read like a system reboot. The Settings update card keeps
+    // a persistent restart affordance for anyone who dismissed the prompt.
+    if (!pendingRestart) pendingRestart = { mode: "relaunch", latest: disk };
+    mainWindow.webContents.send("update:restart-pending",
+        { latest: disk, running: app.getVersion(), mode: "relaunch" });
 }
 
 function findCwd() {

@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.3.6-green.svg)
+![Version](https://img.shields.io/badge/version-1.3.7-green.svg)
 
 ---
 
@@ -102,20 +102,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.6_amd64.deb # arm64: cinesort_1.3.6_arm64.deb
+sudo dpkg -i cinesort_1.3.7_amd64.deb # arm64: cinesort_1.3.7_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.6.x86_64.rpm # arm64: cinesort-1.3.6.aarch64.rpm
+sudo dnf install ./cinesort-1.3.7.x86_64.rpm # arm64: cinesort-1.3.7.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.6.AppImage # arm64: CineSort-1.3.6-arm64.AppImage
-./CineSort-1.3.6.AppImage
+chmod +x CineSort-1.3.7.AppImage # arm64: CineSort-1.3.7-arm64.AppImage
+./CineSort-1.3.7.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -216,6 +216,7 @@ Restart the app for changes to take effect when editing the file manually.
 | `CINESORT_UPDATE_CHECK` | `1` | Set to `0` to disable the once-per-day update check against the GitHub releases API (the only non-metadata outbound request; nothing ever auto-installs) |
 | `CINESORT_LOW_CONFIDENCE` | `0.4` | Matches at/below this score are never auto-selected for renaming (0–1) |
 | `CINESORT_REVIEW_CONFIDENCE` | `0.6` | Matches below this score show the "needs review" marker and count toward "Review N matches" (0–1) |
+| `CINESORT_CACHE_TTL` | `900` | Seconds that provider responses (searches, episode lists) are cached in memory — re-matching the same show costs zero requests within this window. `0` disables caching |
 | `CINESORT_HOST` | `0.0.0.0` | Server bind address |
 | `CINESORT_PORT` | `8888` | Server port |
 | `CINESORT_DATA_DIR` | `/data` (Docker image) | Where history (`history.json`) and UI-saved API keys (`config/keys.env`) live. The image points it at the `/data` volume so both survive container recreation. Unset on desktop builds (per-user home paths are used). |
@@ -293,7 +294,7 @@ When a file shows **No match found** in the right pane:
 | **Anime** | `{n}/{n} - {absolute} - {t}` | Absolute-numbered anime |
 | **Flat** | `{n} - {s00e00} - {t}` | Rename in-place, no folders |
 
-Or build your own: type tokens directly, or click them from the **token palette** under the template field — a **live preview** shows the resulting path for the first file as you edit. Available tokens: `{n}`, `{y}`, `{s}`, `{e}`, `{s00e00}`, `{t}`, `{absolute}`, `{source}`, `{vf}`, `{group}`.
+Or build your own: type tokens directly, or click them from the **token palette** under the template field — a **live preview** shows the resulting path for the first file as you edit. Available tokens: `{n}`, `{y}`, `{s}`, `{e}`, `{s00e00}`, `{t}`, `{absolute}`, `{source}`, `{vf}`, `{group}`, `{codec}`, `{audio}`, `{edition}`, `{tmdbid}`, `{imdbid}`. Empty tokens collapse cleanly — `{n} ({y}) [{edition}]` renders as `Movie (2010) [Extended]` for an extended cut and plain `Movie (2010)` otherwise, matching Jellyfin/Plex edition naming. The id tokens enable agent hints like `{n} ({y}) [imdbid-{imdbid}]`: `{tmdbid}` is set only for TMDb matches and `{imdbid}` only for OMDb/IMDb matches (TVmaze ids are TVmaze-internal and map to neither); an empty id collapses the whole `[imdbid-…]` hint. `{id}` keeps its source-dependent value for existing templates.
 
 ### 5. Choose an action
 
@@ -517,6 +518,18 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.3.7
+- **Provider response cache** — searches and episode lists are cached in memory for 15 minutes, so re-matching the same show (or clicking through a disambiguation) costs zero repeat requests. Tune or disable with `CINESORT_CACHE_TTL` (seconds, `0` = off); cleared automatically when you change keys or language in Settings.
+- **Non-blocking rename with live progress** — renames run off the main loop, so copying huge files no longer freezes the UI (or Docker's healthcheck); the status bar shows `Renaming 3/12: file…` with a real progress bar.
+- **Series sources back each other up** — when TMDb finds no show, TVmaze is tried automatically (and vice versa) before reporting "No results"; View metadata shows which provider supplied the match, e.g. `Metadata source: TVMAZE (fallback)`.
+- **Air-date matching tolerates ±1 day** — daily-show files stamped with the local broadcast date now match the adjacent provider air date at score 0.9 (exact dates still score higher).
+- **Smarter music matching** — MusicBrainz queries prefer official studio-album recordings (no more live-bootleg albums for `Nirvana - Lithium`), results blend MusicBrainz's own relevance with filename similarity, and music matches now show the same "Why this match" breakdown as video.
+- **New template tokens** — `{codec}` (x265), `{audio}` (DTS-HD), `{edition}` (Extended) and Jellyfin/Plex agent hints `{tmdbid}`/`{imdbid}` (`{n} ({y}) [imdbid-{imdbid}]`); empty tokens collapse cleanly, so files without an edition or id never get dangling `[]` brackets.
+- **Undo cleans up after itself** — undoing a move/copy also removes the now-empty folders the rename created (never touches folders that still contain anything).
+- **Actionable rename results** — every result row gets a button: Show in folder (desktop), Copy path (Docker/browser), Copy error on failures.
+- **Richer show disambiguation** — the "multiple shows found" dialog shows status and genre chips (`Ended · Drama`), the fields that actually distinguish same-named reboots.
+- **Desktop resilience** — a failed startup now shows the backend's own error log with one-click copy (instead of silently vanishing), and a backend crash mid-session restarts transparently once, with a Relaunch/Quit dialog if it keeps dying.
 
 ### v1.3.6
 - **Resilient metadata fetches** — TMDb, TVmaze, and OMDb requests now retry exactly once on a rate limit (HTTP 429, honoring the provider's `Retry-After`, capped at 5 s) or a network timeout, so one transient blip no longer fails a whole match group. Real errors (revoked key, not found) still fail fast and are reported exactly as before. MusicBrainz is deliberately excluded — its client already rate-limits itself to 1 request/s per MusicBrainz policy.

@@ -13,6 +13,36 @@ from typing import List, Optional
 from dataclasses import dataclass, asdict
 
 
+def _common_ancestor(a: Path, b: Path) -> Path:
+    """Deepest directory containing both paths. Fallback: `a`'s parent —
+    which makes the caller's prune a no-op (start == stop), the safe answer
+    when the paths can't be related."""
+    try:
+        return Path(os.path.commonpath([str(a), str(b)]))
+    except ValueError:
+        return a.parent
+
+
+def _prune_empty_dirs(start: Path, stop: Path, max_levels: int = 3) -> None:
+    """Remove `start` and then its parents while they are empty — the folder
+    skeleton a forward move created (destination.parent.mkdir(parents=True))
+    should disappear with the undo. Walks up at most `max_levels` directories
+    and never removes `stop` (the common ancestor of source and destination)
+    or anything above it. rmdir() refuses non-empty directories, so this can
+    never delete data: the walk simply stops at the first directory still in
+    use. Best-effort by design — a failure leaves the husk, never breaks the
+    undo that already succeeded."""
+    p = start
+    for _ in range(max_levels):
+        if p == stop or p == p.parent:
+            break
+        try:
+            p.rmdir()
+        except OSError:
+            break   # not empty / gone / no permission — leave the rest alone
+        p = p.parent
+
+
 @dataclass
 class HistoryEntry:
     """A single rename operation."""
@@ -137,6 +167,8 @@ class RenameHistory:
             except OSError as e:
                 return False, f"Undo failed: {e}"
             record()
+            # A copy/link into a fresh folder also created that folder.
+            _prune_empty_dirs(dest.parent, _common_ancestor(dest, orig))
             return True, f"Reverted: removed {dest.name} (original kept)"
 
         # ── move / rename / keeplink: move the file back ──────────────────────
@@ -168,6 +200,9 @@ class RenameHistory:
                     raise
 
             record()
+            # Remove the now-empty folder skeleton the forward move created,
+            # stopping at the common ancestor (which pre-existed the rename).
+            _prune_empty_dirs(dest.parent, _common_ancestor(dest, orig))
             return True, f"Reverted: {dest.name} → {orig.name}"
         except Exception as e:
             return False, f"Undo failed: {str(e)}"

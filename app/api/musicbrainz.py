@@ -17,7 +17,7 @@ from typing import Optional
 
 
 API_BASE = "https://musicbrainz.org/ws/2"
-USER_AGENT = "CineSort/1.3.6 (https://github.com/aiulian25/cinesort)"
+USER_AGENT = "CineSort/1.3.7 (https://github.com/aiulian25/cinesort)"
 MIN_REQUEST_INTERVAL = 1.0   # seconds — MusicBrainz hard rate limit
 
 
@@ -29,12 +29,39 @@ class MBRecording:
     track_no: Optional[int] = None
     year: Optional[int] = None
     score: int = 0   # MusicBrainz's own 0-100 relevance score
+    # True when `album` came from an official studio album (release-group
+    # primary-type Album, no secondary types like Live/Compilation).
+    album_is_studio: bool = False
 
 
 def _lucene_escape(s: str) -> str:
     """Escape the quote/backslash characters that would break a quoted
     Lucene phrase — filenames feed straight into the query string."""
     return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _pick_release(releases: list) -> Optional[dict]:
+    """Choose which release supplies the album title (and track number).
+
+    `releases[0]` blindly took whatever MusicBrainz listed first — live
+    verification once filed Nirvana under a live bootleg. The search response
+    embeds each release's release-group with `primary-type` and
+    `secondary-types` (Live/Compilation/Bootleg/… all appear as secondary
+    types), so rank lexicographically: primary-type Album first, then no
+    secondary types (a studio album), then having a release date. Ties keep
+    the original list order (`max` returns the first maximum), so a recording
+    whose only releases are live sets still matches exactly as before.
+    """
+    if not releases:
+        return None
+
+    def rank(r: dict):
+        rg = r.get("release-group") or {}
+        primary = (rg.get("primary-type") or "").lower()
+        secondary = rg.get("secondary-types") or []
+        return (primary == "album", not secondary, bool(r.get("date")))
+
+    return max(releases, key=rank)
 
 
 class MusicBrainzClient:
@@ -74,9 +101,21 @@ class MusicBrainzClient:
         else:
             query = f'recording:"{_lucene_escape(title)}"'
 
-        resp = await self._throttled_get("/recording", {"query": query, "limit": str(limit)})
+        # First pass restricts to recordings with an OFFICIAL STUDIO ALBUM
+        # release. Without it, popular tracks drown in live-bootleg
+        # recordings — "Lithium" returns 25+ concert recordings before the
+        # Nevermind one (all scoring 100 on an exact-title query, in unstable
+        # order), so no client-side ranking can recover the studio album.
+        # Zero results (tracks existing only on singles/lives/compilations)
+        # → one unfiltered retry, so nothing that matched before is lost.
+        filtered = f"{query} AND primarytype:album AND -secondarytype:* AND status:official"
+        resp = await self._throttled_get("/recording", {"query": filtered, "limit": str(limit)})
         resp.raise_for_status()
         data = resp.json()
+        if not data.get("recordings"):
+            resp = await self._throttled_get("/recording", {"query": query, "limit": str(limit)})
+            resp.raise_for_status()
+            data = resp.json()
 
         results: list[MBRecording] = []
         for rec in data.get("recordings", []):
@@ -85,10 +124,14 @@ class MusicBrainzClient:
 
             album = None
             track_no = None
-            releases = rec.get("releases") or []
-            if releases:
-                album = releases[0].get("title")
-                media = releases[0].get("media") or []
+            album_is_studio = False
+            release = _pick_release(rec.get("releases") or [])
+            if release:
+                album = release.get("title")
+                rg = release.get("release-group") or {}
+                album_is_studio = ((rg.get("primary-type") or "").lower() == "album"
+                                   and not (rg.get("secondary-types") or []))
+                media = release.get("media") or []
                 if media:
                     # Prefer the explicit track number; fall back to offset+1.
                     tracks = media[0].get("track") or []
@@ -112,7 +155,17 @@ class MusicBrainzClient:
                 track_no=track_no,
                 year=year,
                 score=rec.get("score", 0) or 0,
+                album_is_studio=album_is_studio,
             ))
+
+        # Deterministic order for the caller's best-pick loop: relevance
+        # first, then studio albums before live/compilation-only recordings,
+        # then EARLIEST first-release year — the canonical original album
+        # beats deluxe reissues and anniversary boxes. Exact-title queries
+        # tie whole pages at score 100, and MusicBrainz returns those ties
+        # in unstable order between calls.
+        results.sort(key=lambda r: (-r.score, not r.album_is_studio,
+                                    r.year if r.year is not None else 9999))
         return results
 
     async def close(self):

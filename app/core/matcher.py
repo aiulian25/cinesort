@@ -5,6 +5,7 @@ and EpisodeMetrics cascade. Matches detected files against API metadata.
 
 import re
 import unicodedata
+from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -109,6 +110,18 @@ def year_match(file_year: Optional[int], meta_year: Optional[int]) -> float:
 
 
 # Human-readable labels for each metric, used by the breakdown view.
+def _dates_within_one_day(a: str, b: str) -> bool:
+    """True when two YYYY-MM-DD dates are at most one calendar day apart.
+    datetime arithmetic, so month/year boundaries (2024-01-01 vs 2023-12-31)
+    are handled correctly. Malformed input → False, never a crash."""
+    try:
+        da = datetime.strptime(a, "%Y-%m-%d")
+        db = datetime.strptime(b, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return False
+    return abs((da - db).days) <= 1
+
+
 METRIC_LABELS = {
     "sxe": "Season/Episode",
     "abs": "Absolute number",
@@ -117,6 +130,10 @@ METRIC_LABELS = {
     "sub": "Substring",
     "year": "Year",
     "date": "Air date",
+    # Music-only: MusicBrainz's own 0-100 relevance, blended into the music
+    # score in main.py (which builds that score_detail by hand — music
+    # doesn't flow through cascade_breakdown).
+    "mb": "MusicBrainz relevance",
 }
 
 
@@ -168,10 +185,15 @@ def _score_components(
         scores.append(("year", ym, 1.0))
 
     # 7. Air-date match (daily shows: filename date vs. episode air date).
-    # Exact equality only — both sides are already normalized to YYYY-MM-DD
-    # (detector DATE_PATTERN and the TMDb/TVmaze clients).
-    if file_date and meta_air_date and file_date == meta_air_date:
-        scores.append(("date", 1.0, 3.0))
+    # Both sides are already normalized to YYYY-MM-DD (detector DATE_PATTERN
+    # and the TMDb/TVmaze clients). Exact scores 1.0; ±1 day scores 0.9 —
+    # files are stamped with the LOCAL broadcast date, which is routinely one
+    # day off the provider's air date across timezones.
+    if file_date and meta_air_date:
+        if file_date == meta_air_date:
+            scores.append(("date", 1.0, 3.0))
+        elif _dates_within_one_day(file_date, meta_air_date):
+            scores.append(("date", 0.9, 3.0))
 
     return scores
 

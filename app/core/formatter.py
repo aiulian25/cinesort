@@ -52,7 +52,12 @@ def apply_template(template: str, bindings: dict[str, Any]) -> str:
       {source}  - video source
       {vf}      - video format
       {group}   - release group
-      {id}      - database ID
+      {codec}   - video codec (x265, HEVC…)
+      {audio}   - audio codec (DTS-HD, AAC…)
+      {edition} - edition tag (Extended, Director's…)
+      {id}      - database ID (source-dependent; kept for compatibility)
+      {tmdbid}  - TMDb id (empty unless the match came from TMDb)
+      {imdbid}  - IMDb id (empty unless the match came from OMDb/IMDb)
     """
 
     # Pre-compute derived bindings
@@ -85,7 +90,14 @@ def apply_template(template: str, bindings: dict[str, Any]) -> str:
 
     result = re.sub(r'\{(\w+)\}', replacer, template)
 
-    # Clean up double separators from empty bindings
+    # Clean up double separators from empty bindings. Jellyfin/Plex id hints
+    # first: "[imdbid-{imdbid}]" with an empty id leaves "[imdbid-]" — a
+    # dangling prefix, removed by NAME so a filled "[BluRay-…]"-style bracket
+    # a user typed can never be swallowed. Then generic empty pairs:
+    # "{n} ({y}) [{edition}]" with no edition must not leave "[]".
+    result = re.sub(r'\[(?:imdbid|tmdbid)-\]', '', result, flags=re.IGNORECASE)
+    result = re.sub(r'\[\s*\]', '', result)
+    result = re.sub(r'\(\s*\)', '', result)
     result = re.sub(r'  +', ' ', result)
     result = re.sub(r'- -', '-', result)
     result = re.sub(r'/+', '/', result)

@@ -36,6 +36,11 @@ class DetectionResult:
     group: Optional[str] = None
     source: Optional[str] = None
     video_format: Optional[str] = None
+    # Template-token fields ({codec}/{audio}/{edition}) — extracted by the
+    # same patterns that strip them from clean_name.
+    codec: Optional[str] = None
+    audio: Optional[str] = None
+    edition: Optional[str] = None
     original_filename: str = ""
     # Music-only fields (parse_music_info); None for video/subtitle files.
     artist: Optional[str] = None
@@ -381,6 +386,39 @@ def extract_source(filename: str) -> Optional[str]:
     return m.group(0) if m else None
 
 
+def extract_codec(filename: str) -> Optional[str]:
+    m = VIDEO_CODEC_PATTERN.search(filename)
+    return m.group(0) if m else None
+
+
+def extract_audio(filename: str) -> Optional[str]:
+    m = AUDIO_CODEC_PATTERN.search(filename)
+    return m.group(0) if m else None
+
+
+# Release-quality flags matched by VIDEO_TAGS_PATTERN that are NOT editions —
+# "Movie (2010) [REPACK]" is not a Jellyfin/Plex edition name.
+_NON_EDITION_TAGS = {"repack", "proper", "rerip"}
+
+
+def extract_edition(filename: str) -> Optional[str]:
+    """Edition tag for the {edition} token: 'Extended', "Director's",
+    'Remastered', 'IMAX'… Normalized: separators to spaces, the trailing
+    Cut/Edition/Version word stripped ('Extended.Cut' and 'Extended Edition'
+    both yield 'Extended'), words title-cased except short all-caps acronyms
+    (IMAX) — plain .title() would mangle "Director's" into "Director'S"."""
+    for m in VIDEO_TAGS_PATTERN.finditer(filename):
+        tag = re.sub(r'[._-]+', ' ', m.group(0)).strip()
+        tag = re.sub(r'\s*(?:Cut|Edition|Version)$', '', tag, flags=re.IGNORECASE).strip()
+        if not tag or tag.lower() in _NON_EDITION_TAGS:
+            continue
+        return " ".join(
+            w if (w.isupper() and len(w) <= 4) else (w[0].upper() + w[1:].lower())
+            for w in tag.split()
+        )
+    return None
+
+
 def parse_music_info(stem: str) -> tuple[Optional[str], Optional[int], Optional[str], Optional[str]]:
     """Parse an audio filename stem into (artist, track, album, title).
 
@@ -483,5 +521,8 @@ def detect(path: Path) -> DetectionResult:
         group=extract_release_group(filename),
         source=extract_source(filename),
         video_format=extract_video_format(filename),
+        codec=extract_codec(filename),
+        audio=extract_audio(filename),
+        edition=extract_edition(filename),
         original_filename=filename,
     )

@@ -35,7 +35,7 @@ from app.core.detector import (
     VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, AUDIO_EXTENSIONS,
     extract_subtitle_lang_tag,
 )
-from app.core.matcher import cascade_score, cascade_breakdown, name_similarity
+from app.core.matcher import cascade_score, cascade_breakdown, name_similarity, METRIC_LABELS
 from app.core.formatter import apply_template, build_new_path, TEMPLATES, sanitize_filename
 from app.core.renamer import execute_rename, RenameAction, RenameResult
 from app.core.history import history, HistoryEntry
@@ -45,7 +45,8 @@ from app.api.tvmaze import TVMazeClient
 from app.api.omdb import OMDbClient
 from app.api.musicbrainz import MusicBrainzClient
 from app.api.retry import with_retry
-from datetime import datetime
+from app.core.cache import cached, provider_cache
+from datetime import datetime, timedelta
 import uuid
 
 # ── Load user config (deb/AppImage: ~/.config/cinesort/keys.env) ─────────────
@@ -54,7 +55,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.3.6")
+app = FastAPI(title="CineSort", version="1.3.7")
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -88,6 +89,13 @@ mb = MusicBrainzClient()   # keyless; throttled to 1 req/s per MusicBrainz terms
 # serializes matches (the Match button is disabled while one runs), so at most
 # one match is in flight per instance and no locking is needed.
 match_progress = {"active": False, "current": 0, "total": 0, "group": "", "files": 0, "started": 0.0}
+
+# Same pattern for the current /api/rename run (GET /api/rename-progress).
+# The Rename button is disabled while a run is in flight, so a single
+# snapshot is enough here too. Written from the rename worker thread — safe
+# without a lock because each field assignment is GIL-atomic and readers
+# only render a transient status line.
+rename_progress = {"active": False, "current": 0, "total": 0, "file": ""}
 
 
 @app.get("/")
@@ -218,6 +226,9 @@ def _file_entry(p: Path) -> dict:
         "group": det.group,
         "source": det.source,
         "video_format": det.video_format,
+        "codec": det.codec,
+        "audio": det.audio,
+        "edition": det.edition,
         # Music-only fields (None for video/subtitles)
         "artist": det.artist,
         "album": det.album,
@@ -645,6 +656,128 @@ def _index_episodes(episodes_data: list[dict]) -> tuple[dict, dict, dict]:
     return se_index, abs_index, date_index
 
 
+def _adjacent_date_episode(file_date, date_index: dict):
+    """Episode airing one day before/after `file_date`, or None.
+
+    Daily-show files are stamped with the LOCAL broadcast date, routinely one
+    day off the provider's air date across timezones. The day BEFORE is
+    probed first: the common case is a file dated one day AFTER the listed
+    air date (late-night broadcasts crossing midnight, viewers east of the
+    studio), so when a daily show has episodes on both neighboring days the
+    previous day is the better prior. The detector guarantees YYYY-MM-DD via
+    DATE_PATTERN, but parse defensively anyway."""
+    if not file_date or not date_index:
+        return None
+    try:
+        d = datetime.strptime(file_date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+    for delta in (-1, 1):
+        hit = date_index.get((d + timedelta(days=delta)).strftime("%Y-%m-%d"))
+        if hit is not None:
+            return hit
+    return None
+
+
+async def _find_series(datasource: str, group_name: str, year, source_errors: dict):
+    """Search ONE TV source for a series and download its episode list.
+
+    Pure extraction of the former per-source search blocks so the caller can
+    retry the OTHER source when this one comes up empty (series fallback).
+
+    Returns (show_data, episodes_data, failed_seasons, episodes_fetch_error,
+    needs_selection). `needs_selection` is the multi-candidate payload for
+    the disambiguation dialog — the caller only honors it from the PRIMARY
+    source: show ids are source-specific, and the follow-up request would
+    query req.datasource with them, so a fallback-source prompt would wire
+    the wrong id to the wrong provider.
+    """
+    show_data = None
+    episodes_data: list = []
+    failed_seasons: dict[int, str] = {}
+    episodes_fetch_error: Optional[str] = None
+
+    if datasource == "tvmaze":
+        # TVmaze search has no year filter, so we only vary the query.
+        shows, errs = await _cascade_search(
+            lambda q, _y: cached(("tvmaze", "search", q),
+                                 lambda: tvmaze.search_shows(q)), group_name, None
+        )
+        if errs:
+            source_errors.setdefault("tvmaze", errs[0])
+        shows = _disambiguate_by_year(shows, year)
+        if len(shows) > 1:
+            return None, [], {}, None, {
+                "needs_selection": True,
+                "group_name": group_name,
+                "candidates": [
+                    # status + genres: the fields that actually distinguish
+                    # same-named reboots ("Ended · Drama" vs "Running · …").
+                    {"id": s.id, "name": s.name, "year": s.year, "poster": s.image_url,
+                     "overview": s.summary[:200] if s.summary else "",
+                     "status": s.status, "genres": (s.genres or [])[:3]}
+                    for s in shows[:10]
+                ],
+            }
+        elif shows:
+            show = shows[0]
+            show_data = {"id": show.id, "name": show.name, "year": show.year, "poster": show.image_url}
+            try:
+                eps = await cached(
+                    ("tvmaze", "episodes", show.id),
+                    lambda: with_retry(lambda: tvmaze.get_episodes(show.id)))
+            except Exception as exc:
+                episodes_fetch_error = _sanitize_error(exc)
+                eps = []
+            episodes_data = [
+                {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
+                for e in eps
+            ]
+    else:
+        shows, errs = await _cascade_search(
+            lambda q, y: cached(("tmdb", "search_tv", q, y),
+                                lambda: tmdb.search_tv(q, y)), group_name, year
+        )
+        if errs:
+            source_errors.setdefault("tmdb", errs[0])
+        shows = _disambiguate_by_year(shows, year)
+        if len(shows) > 1:
+            return None, [], {}, None, {
+                "needs_selection": True,
+                "group_name": group_name,
+                "candidates": [
+                    # TMDb search results carry no status/genre names — empty
+                    # fields keep one candidate shape without extra API calls.
+                    {"id": s.id, "name": s.title, "year": s.year, "poster": s.poster_url_small,
+                     "overview": s.overview[:200] if s.overview else "",
+                     "rating": s.vote_average, "status": "", "genres": []}
+                    for s in shows[:10]
+                ],
+            }
+        elif shows:
+            show = shows[0]
+            show_data = {"id": show.id, "name": show.title, "year": show.year, "poster": show.poster_url_small}
+            # Fetch all seasons
+            details = await cached(
+                ("tmdb", "details", show.id),
+                lambda: with_retry(lambda: tmdb.get_tv_details(show.id)))
+            seasons = details.get("seasons", [])
+            for s in seasons:
+                sn = s.get("season_number", 0)
+                try:
+                    eps = await cached(
+                        ("tmdb", "season", show.id, sn),
+                        lambda: with_retry(lambda: tmdb.get_tv_season(show.id, sn)))
+                    episodes_data.extend([
+                        {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
+                        for e in eps
+                    ])
+                except Exception as exc:
+                    failed_seasons[sn] = _sanitize_error(exc)
+
+    return show_data, episodes_data, failed_seasons, episodes_fetch_error, None
+
+
 # ─── Match Endpoint ────────────────────────────────────────────────────
 
 @app.post("/api/match")
@@ -664,6 +797,12 @@ async def match_files(req: MatchRequest):
 async def get_match_progress():
     """Live snapshot of the running match (see match_progress above)."""
     return match_progress
+
+
+@app.get("/api/rename-progress")
+async def get_rename_progress():
+    """Live snapshot of the running rename (see rename_progress above)."""
+    return rename_progress
 
 
 async def _match_files_impl(req: MatchRequest):
@@ -722,18 +861,29 @@ async def _match_files_impl(req: MatchRequest):
             match_progress["files"] = 1
 
             try:
-                recs = await mb.search_recording(
-                    f.get("artist"), f.get("title") or f.get("clean_name") or ""
+                # Cached (15 min) — amortizes MusicBrainz's mandatory 1 req/s
+                # throttle across repeated audio matches. Deliberately NOT
+                # retried (see retry.py on MusicBrainz policy).
+                mb_artist = f.get("artist")
+                mb_title = f.get("title") or f.get("clean_name") or ""
+                recs = await cached(
+                    ("musicbrainz", "recording", mb_artist, mb_title),
+                    lambda: mb.search_recording(mb_artist, mb_title),
                 )
             except Exception as exc:
                 source_errors.setdefault("musicbrainz", _sanitize_error(exc))
                 recs = []
 
-            best, best_score = None, 0.0
+            best, best_score, best_ns = None, 0.0, 0.0
             for c in recs:
-                s = name_similarity(f.get("clean_name") or "", f"{c.artist} - {c.title}")
+                # Blend our filename similarity with MusicBrainz's own 0-100
+                # relevance: near-ties on similarity are broken by the
+                # provider's ranking instead of raw list order. The winner's
+                # components are kept so score_detail shows the REAL inputs.
+                ns = name_similarity(f.get("clean_name") or "", f"{c.artist} - {c.title}")
+                s = 0.7 * ns + 0.3 * ((getattr(c, "score", 0) or 0) / 100.0)
                 if s > best_score:
-                    best, best_score = c, s
+                    best, best_score, best_ns = c, s, ns
 
             if best:
                 # Prefer the track number parsed from the filename — the
@@ -755,6 +905,14 @@ async def _match_files_impl(req: MatchRequest):
                     "new_name": new_path.name,
                     "preview": str(new_path.relative_to(original.parent)),
                     "score": round(best_score, 3),
+                    # Same shape as cascade_breakdown()'s components, so the
+                    # existing Why-this-match table renders it unchanged.
+                    "score_detail": [
+                        {"metric": "name", "label": METRIC_LABELS["name"],
+                         "value": round(best_ns, 3), "weight": 0.7},
+                        {"metric": "mb", "label": METRIC_LABELS["mb"],
+                         "value": round((getattr(best, "score", 0) or 0) / 100.0, 3), "weight": 0.3},
+                    ],
                     "matched": True,
                     "metadata": {
                         "artist": best.artist,
@@ -804,16 +962,23 @@ async def _match_files_impl(req: MatchRequest):
         # "No episode match in 'Show'" — implying the episode doesn't exist.
         failed_seasons: dict[int, str] = {}
         episodes_fetch_error: Optional[str] = None
+        # Set when the OTHER TV source was queried after the primary found
+        # nothing — drives the "(also tried …)" part of failure reasons.
+        fallback_tried: Optional[str] = None
 
         if media_type == "series":
             # Check if user already selected a specific show
             if req.selected_show_id and req.selected_show_name:
                 # Use the pre-selected show
                 if req.datasource == "tvmaze":
-                    show_details = await with_retry(lambda: tvmaze.get_show(req.selected_show_id))
+                    show_details = await cached(
+                        ("tvmaze", "show", req.selected_show_id),
+                        lambda: with_retry(lambda: tvmaze.get_show(req.selected_show_id)))
                     show_data = {"id": show_details.id, "name": show_details.name, "year": show_details.year, "poster": show_details.image_url}
                     try:
-                        eps = await with_retry(lambda: tvmaze.get_episodes(req.selected_show_id))
+                        eps = await cached(
+                            ("tvmaze", "episodes", req.selected_show_id),
+                            lambda: with_retry(lambda: tvmaze.get_episodes(req.selected_show_id)))
                     except Exception as exc:
                         episodes_fetch_error = _sanitize_error(exc)
                         eps = []
@@ -822,13 +987,17 @@ async def _match_files_impl(req: MatchRequest):
                         for e in eps
                     ]
                 else:
-                    show_details = await with_retry(lambda: tmdb.get_tv_details(req.selected_show_id))
+                    show_details = await cached(
+                        ("tmdb", "details", req.selected_show_id),
+                        lambda: with_retry(lambda: tmdb.get_tv_details(req.selected_show_id)))
                     show_data = {"id": req.selected_show_id, "name": show_details.get("name"), "year": show_details.get("first_air_date", "")[:4] if show_details.get("first_air_date") else None, "poster": f"https://image.tmdb.org/t/p/w154{show_details.get('poster_path')}" if show_details.get("poster_path") else None}
                     seasons = show_details.get("seasons", [])
                     for s in seasons:
                         sn = s.get("season_number", 0)
                         try:
-                            eps = await with_retry(lambda: tmdb.get_tv_season(req.selected_show_id, sn))
+                            eps = await cached(
+                                ("tmdb", "season", req.selected_show_id, sn),
+                                lambda: with_retry(lambda: tmdb.get_tv_season(req.selected_show_id, sn)))
                             episodes_data.extend([
                                 {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
                                 for e in eps
@@ -836,83 +1005,50 @@ async def _match_files_impl(req: MatchRequest):
                         except Exception as exc:
                             failed_seasons[sn] = _sanitize_error(exc)
             else:
-                # Search (with progressively-trimmed fallback queries) and check
-                # for multiple matches.
-                if req.datasource == "tvmaze":
-                    # TVmaze search has no year filter, so we only vary the query.
-                    shows, errs = await _cascade_search(
-                        lambda q, _y: tvmaze.search_shows(q), group_name, None
-                    )
-                    if errs:
-                        source_errors.setdefault("tvmaze", errs[0])
-                    shows = _disambiguate_by_year(shows, year)
-                    if len(shows) > 1:
-                        # Multiple matches - ask user to select
-                        return {
-                            "needs_selection": True,
-                            "group_name": group_name,
-                            "candidates": [
-                                {"id": s.id, "name": s.name, "year": s.year, "poster": s.image_url, "overview": s.summary[:200] if s.summary else ""}
-                                for s in shows[:10]
-                            ],
-                        }
-                    elif shows:
-                        show = shows[0]
-                        show_data = {"id": show.id, "name": show.name, "year": show.year, "poster": show.image_url}
-                        try:
-                            eps = await with_retry(lambda: tvmaze.get_episodes(show.id))
-                        except Exception as exc:
-                            episodes_fetch_error = _sanitize_error(exc)
-                            eps = []
-                        episodes_data = [
-                            {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
-                            for e in eps
-                        ]
-                else:
-                    shows, errs = await _cascade_search(
-                        lambda q, y: tmdb.search_tv(q, y), group_name, year
-                    )
-                    if errs:
-                        source_errors.setdefault("tmdb", errs[0])
-                    shows = _disambiguate_by_year(shows, year)
-                    if len(shows) > 1:
-                        # Multiple matches - ask user to select
-                        return {
-                            "needs_selection": True,
-                            "group_name": group_name,
-                            "candidates": [
-                                {"id": s.id, "name": s.title, "year": s.year, "poster": s.poster_url_small, "overview": s.overview[:200] if s.overview else "", "rating": s.vote_average}
-                                for s in shows[:10]
-                            ],
-                        }
-                    elif shows:
-                        show = shows[0]
-                        show_data = {"id": show.id, "name": show.title, "year": show.year, "poster": show.poster_url_small}
-                        # Fetch all seasons
-                        details = await with_retry(lambda: tmdb.get_tv_details(show.id))
-                        seasons = details.get("seasons", [])
-                        for s in seasons:
-                            sn = s.get("season_number", 0)
-                            try:
-                                eps = await with_retry(lambda: tmdb.get_tv_season(show.id, sn))
-                                episodes_data.extend([
-                                    {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
-                                    for e in eps
-                                ])
-                            except Exception as exc:
-                                failed_seasons[sn] = _sanitize_error(exc)
+                # Search the selected source (progressively-trimmed queries,
+                # multi-match check). When it yields NOTHING — zero results or
+                # a source error — silently try the other TV source before
+                # reporting "No results". The primary source always wins when
+                # it returns anything, including the disambiguation prompt;
+                # the fallback never second-guesses a found show.
+                (show_data, episodes_data, failed_seasons,
+                 episodes_fetch_error, needs_sel) = await _find_series(
+                    req.datasource, group_name, year, source_errors)
+                if needs_sel:
+                    return needs_sel
+
+                if show_data is None:
+                    other = "tvmaze" if req.datasource == "tmdb" else "tmdb"
+                    # tmdb needs a key; tvmaze is keyless and always available.
+                    if other == "tvmaze" or tmdb.enabled:
+                        fallback_tried = other
+                        (fb_show, fb_eps, fb_failed,
+                         fb_eps_err, fb_sel) = await _find_series(
+                            other, group_name, year, source_errors)
+                        # fb_sel (multiple candidates on the fallback source)
+                        # is deliberately NOT returned: its show ids belong to
+                        # `other`, but a selection re-request would query
+                        # req.datasource with them — wrong show guaranteed.
+                        if fb_show is not None:
+                            fb_show["fallback_source"] = other
+                            show_data, episodes_data = fb_show, fb_eps
+                            failed_seasons = fb_failed
+                            episodes_fetch_error = fb_eps_err
 
             # Surface fetch failures in the match status line too (first one
-            # wins, matching the _cascade_search convention above).
+            # wins, matching the _cascade_search convention above). Attribute
+            # them to the source that actually served this show — the
+            # fallback's failures are not the primary's.
+            eff_source = (show_data or {}).get("fallback_source") or req.datasource
             if failed_seasons:
                 first_sn = sorted(failed_seasons)[0]
                 source_errors.setdefault(
-                    req.datasource,
+                    eff_source,
                     f"season {first_sn} fetch failed: {failed_seasons[first_sn]}",
                 )
             if episodes_fetch_error:
                 source_errors.setdefault(
-                    req.datasource, f"episode list fetch failed: {episodes_fetch_error}"
+                    eff_source, f"episode list fetch failed: {episodes_fetch_error}"
                 )
 
             # Match each file to an episode.
@@ -945,6 +1081,12 @@ async def _match_files_impl(req: MatchRequest):
                     # Air-date hit (daily shows: Show.YYYY.MM.DD.mkv).
                     best_ep = date_index[f["date"]]
                     best_score = 0.95
+                elif (adj_ep := _adjacent_date_episode(f.get("date"), date_index)) is not None:
+                    # Tolerant air-date hit (±1 day, timezone skew). 0.9 keeps
+                    # exact dates preferred; the matcher's date metric awards
+                    # the same 0.9 so "Why this match" explains it.
+                    best_ep = adj_ep
+                    best_score = 0.9
                 else:
                     for ep in episodes_data:
                         score = cascade_score(
@@ -990,7 +1132,15 @@ async def _match_files_impl(req: MatchRequest):
                         "source": f.get("source", ""),
                         "vf": f.get("video_format", ""),
                         "group": f.get("group", ""),
+                        "codec": f.get("codec") or "",
+                        "audio": f.get("audio") or "",
+                        "edition": f.get("edition") or "",
                         "id": show_data["id"],
+                        # eff_source is F13-aware: after a tmdb→tvmaze
+                        # fallback the id is TVmaze-internal and must NOT be
+                        # emitted as a tmdbid. TVmaze ids are never imdb/tmdb.
+                        "tmdbid": show_data["id"] if eff_source == "tmdb" else "",
+                        "imdbid": "",
                     }
                     original = Path(f["path"])
                     new_path = build_new_path(original, template, bindings, original.parent.parent)
@@ -1009,6 +1159,10 @@ async def _match_files_impl(req: MatchRequest):
                             "episode": best_ep["episode"],
                             "title": best_ep.get("title"),
                             "poster": show_data.get("poster"),
+                            # Which provider actually supplied this show —
+                            # differs from req.datasource after a fallback.
+                            "datasource": show_data.get("fallback_source") or req.datasource,
+                            "fallback": bool(show_data.get("fallback_source")),
                         },
                     })
                 else:
@@ -1019,21 +1173,31 @@ async def _match_files_impl(req: MatchRequest):
                     if fs is not None and fs in failed_seasons:
                         reason = (
                             f"Season {fs} could not be loaded from "
-                            f"{req.datasource} ({failed_seasons[fs]})"
+                            f"{eff_source} ({failed_seasons[fs]})"
                         )
                     elif show_data and episodes_fetch_error:
                         reason = (
                             f"Episode list could not be loaded from "
-                            f"{req.datasource} ({episodes_fetch_error})"
+                            f"{eff_source} ({episodes_fetch_error})"
                         )
                     elif show_data:
                         reason = f"No episode match in '{show_data.get('name', group_name)}'"
                     elif req.datasource in source_errors:
                         reason = f"{req.datasource} error: {source_errors[req.datasource]}"
+                        if fallback_tried:
+                            reason += (
+                                f"; fallback {fallback_tried} also failed: {source_errors[fallback_tried]}"
+                                if fallback_tried in source_errors
+                                else f"; fallback {fallback_tried} found nothing"
+                            )
                     elif req.datasource == "tmdb" and not tmdb.enabled:
                         reason = "TMDb key not configured — add it in Settings"
+                        if fallback_tried:
+                            reason += " (tvmaze fallback found nothing)"
                     else:
                         reason = f"No results for '{group_name}'"
+                        if fallback_tried:
+                            reason += f" (also tried {fallback_tried})"
                     results.append({
                         "original": f["path"],
                         "filename": f["filename"],
@@ -1056,7 +1220,8 @@ async def _match_files_impl(req: MatchRequest):
 
             if tmdb.enabled:
                 tmdb_results, errs = await _cascade_search(
-                    lambda q, y: tmdb.search_movie(q, y, include_adult=req.include_adult),
+                    lambda q, y: cached(("tmdb", "search_movie", q, y, req.include_adult),
+                                        lambda: tmdb.search_movie(q, y, include_adult=req.include_adult)),
                     group_name, year,
                 )
                 if errs:
@@ -1073,7 +1238,8 @@ async def _match_files_impl(req: MatchRequest):
 
             if omdb.enabled:
                 omdb_results, errs = await _cascade_search(
-                    lambda q, y: omdb.search_movie(q, y), group_name, year,
+                    lambda q, y: cached(("omdb", "search_movie", q, y),
+                                        lambda: omdb.search_movie(q, y)), group_name, year,
                 )
                 if errs:
                     source_errors.setdefault("omdb", errs[0])
@@ -1149,7 +1315,12 @@ async def _match_files_impl(req: MatchRequest):
                         "source": f.get("source", ""),
                         "vf": f.get("video_format", ""),
                         "group": f.get("group", ""),
+                        "codec": f.get("codec") or "",
+                        "audio": f.get("audio") or "",
+                        "edition": f.get("edition") or "",
                         "id": best_movie["id"],
+                        "tmdbid": best_movie["id"] if best_movie["source"] == "tmdb" else "",
+                        "imdbid": best_movie["id"] if best_movie["source"] == "omdb" else "",
                     }
                     original = Path(f["path"])
                     new_path = build_new_path(original, template, bindings, original.parent)
@@ -1296,18 +1467,22 @@ async def _match_files_impl(req: MatchRequest):
 
 # ─── Rename Endpoint ───────────────────────────────────────────────────
 
-@app.post("/api/rename")
-async def rename_files(req: RenameRequest):
-    """Execute rename operations."""
-    action = RenameAction(req.action)
+def _rename_sync(operations: list, action: RenameAction, batch_id: str) -> tuple:
+    """Blocking rename loop — runs in a worker thread via asyncio.to_thread so
+    a multi-GB copy or cross-device move never freezes the event loop (the
+    same bug class as the v1.3.0 scan freeze; it also starved the Docker
+    HEALTHCHECK into marking the container unhealthy). Updates the
+    rename_progress snapshot before each operation so the UI can render
+    'Renaming 3/12: file…' while the copy runs."""
     results = []
     history_entries = []
-    # One Rename click = one history batch (drives "Undo all" in the UI).
-    batch_id = str(uuid.uuid4())
 
-    for op in req.operations:
+    for op in operations:
         source = Path(op["original"])
         dest = Path(op["new_path"])
+
+        rename_progress["current"] += 1
+        rename_progress["file"] = source.name
 
         if not source.exists():
             results.append({
@@ -1325,7 +1500,7 @@ async def rename_files(req: RenameRequest):
             "success": result.success,
             "error": result.error,
         })
-        
+
         # Record in history
         history_entries.append(HistoryEntry(
             id=str(uuid.uuid4()),
@@ -1337,8 +1512,29 @@ async def rename_files(req: RenameRequest):
             error=result.error,
             batch_id=batch_id,
         ))
-    
-    # Save to history
+
+    return results, history_entries
+
+
+@app.post("/api/rename")
+async def rename_files(req: RenameRequest):
+    """Execute rename operations in a worker thread with live progress."""
+    action = RenameAction(req.action)
+    # One Rename click = one history batch (drives "Undo all" in the UI).
+    batch_id = str(uuid.uuid4())
+
+    rename_progress.update(active=True, current=0, total=len(req.operations), file="")
+    try:
+        results, history_entries = await asyncio.to_thread(
+            _rename_sync, req.operations, action, batch_id
+        )
+    finally:
+        # Covers success AND an op raising mid-loop — the UI ticker must
+        # never keep showing a dead run.
+        rename_progress["active"] = False
+
+    # History write stays on the event loop, after the thread finishes —
+    # one writer, no thread crossing into the history file.
     if history_entries:
         history.add_batch(history_entries)
 
@@ -1401,7 +1597,17 @@ async def preview_template(req: PreviewRequest):
         "source": pick("source", "WEB-DL"),
         "vf": pick("video_format", "1080p"),
         "group": pick("group", "GROUP"),
+        "codec": pick("codec", "x265"),
+        "audio": pick("audio", "AAC"),
+        # Edition defaults EMPTY on purpose: most files have none, and the
+        # formatter's cleanup collapses the surrounding "[]" — a placeholder
+        # would make every preview claim an Extended cut.
+        "edition": s.get("edition") or "",
         "id": pick("id", 0),
+        # Ids exist only after matching (scan samples never carry them) —
+        # empty here, so "[imdbid-{imdbid}]" previews collapse cleanly.
+        "tmdbid": "",
+        "imdbid": "",
         # Music tokens: real values from the parsed stem (parse_music_info),
         # placeholders otherwise. {track} zero-pads exactly like the real
         # music match path (zfill(2)) so preview and rename can't drift.
@@ -1637,6 +1843,11 @@ async def post_settings(req: SettingsRequest):
     omdb = OMDbClient()
     await old_tmdb.close()
     await old_omdb.close()
+
+    # Cached responses may have been fetched with the old key/metadata
+    # language — drop them so a settings change takes effect immediately
+    # instead of after the TTL.
+    provider_cache.clear()
 
     status = read_config_status()
     return {

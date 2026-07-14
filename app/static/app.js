@@ -417,11 +417,18 @@ function showSelectionDialog(groupName, candidates, filesToMatch) {
         const poster = c.poster ? `<img src="${esc(c.poster)}" style="width:40px;height:60px;object-fit:cover;border-radius:4px;">` : 
                                    `<div style="width:40px;height:60px;background:var(--glass-hover);border-radius:4px;"></div>`;
         const overview = c.overview ? `<div style="font-size:10px;color:var(--txt3);margin-top:4px;line-height:1.4">${esc(c.overview)}</div>` : "";
-        
+        // Status/genre chips — what actually distinguishes same-named
+        // reboots (TVmaze supplies them; TMDb candidates send empty fields).
+        const chipParts = [c.status, ...(Array.isArray(c.genres) ? c.genres : [])].filter(Boolean);
+        const chips = chipParts.length
+            ? `<div style="margin-top:3px">${chipParts.map(t => `<span class="tag">${esc(t)}</span>`).join(" ")}</div>`
+            : "";
+
         html += `<div class="candidate-item" data-id="${c.id}" data-name="${esc(c.name)}">
             ${poster}
             <div style="flex:1;min-width:0;">
                 <div style="font-weight:500;font-size:12px;color:var(--txt)">${esc(c.name)}${year}${rating}</div>
+                ${chips}
                 ${overview}
             </div>
             <button class="glass-btn btn-scan" onclick="R.selectShow(${c.id}, '${esc(c.name).replace(/'/g, "\\'")}', event)" style="padding:4px 12px;font-size:11px">Select</button>
@@ -1132,6 +1139,23 @@ function startMatchProgressTicker() {
     }, 1000);
 }
 
+/* Rename twin of startMatchProgressTicker — "Renaming 3/12: file.mkv…".
+   Kept as its own tiny function (labels and fields differ) rather than one
+   branchy parameterized ticker. The backend runs renames in a worker thread,
+   so this poll stays live even mid-copy of a huge file. */
+function startRenameProgressTicker() {
+    return setInterval(async () => {
+        try {
+            const p = await api("/api/rename-progress");
+            if (p.active && p.total > 0) {
+                statusText.textContent = `Renaming ${p.current}/${p.total}: ${p.file}…`;
+                progressFill.classList.remove("loading");
+                progressFill.style.width = Math.round(100 * p.current / p.total) + "%";
+            }
+        } catch { /* transient poll failure — keep last rendered state */ }
+    }, 1000);
+}
+
 async function doMatch() {
     if (scannedFiles.length === 0) return;
 
@@ -1223,6 +1247,7 @@ async function doRename() {
     const action = elAction.value;
     status(`Renaming ${ops.length} file(s) (${action})…`);
     btnRename.disabled = true;
+    const ticker = startRenameProgressTicker();
 
     try {
         const data = await api("/api/rename", {
@@ -1246,6 +1271,7 @@ async function doRename() {
     } catch (err) {
         statusDone("Rename failed: " + err.message);
     } finally {
+        clearInterval(ticker);
         btnRename.disabled = false;
     }
 }
@@ -1254,21 +1280,45 @@ function showRenameResults(data) {
     modalTitle.textContent = `Rename Results — ${data.action}`;
     let html = `<p style="margin-bottom:10px;color:var(--txt2)">
         ${data.success} succeeded, ${data.failed} failed of ${data.total}</p>`;
-    for (const r of data.results) {
+    // Per-row action: verify where the file landed with one click. Desktop
+    // reveals it via the existing shell:showItem IPC; Docker/browser falls
+    // back to Copy path — the same graceful degradation the context menu uses.
+    const okLabel = canShowInFolder ? "Show in folder" : "Copy path";
+    data.results.forEach((r, i) => {
         if (r.success) {
             html += `<div class="res-row">
                 <span class="res-icon ok">✓</span>
                 <span class="res-text">${esc(r.destination)}</span>
+                <button class="glass-btn res-act" data-i="${i}"
+                        style="margin-left:auto;flex-shrink:0;padding:3px 10px;font-size:10px">${okLabel}</button>
             </div>`;
         } else {
             html += `<div class="res-row">
                 <span class="res-icon fail">✗</span>
                 <span class="res-text">${esc(r.original)}</span>
+                <button class="glass-btn res-act" data-i="${i}"
+                        style="margin-left:auto;flex-shrink:0;padding:3px 10px;font-size:10px">Copy error</button>
             </div>
             <div class="res-err">${esc(r.error)}</div>`;
         }
-    }
+    });
     modalBody.innerHTML = html;
+    // Real listeners over data.results — not inline onclick with a quoted
+    // path, which would break (and be attribute-injectable) for filenames
+    // containing quotes/apostrophes ("Ocean's Eleven").
+    modalBody.querySelectorAll(".res-act").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            const r = data.results[Number(btn.dataset.i)];
+            if (!r) return;
+            if (!r.success) {
+                R.copyPath(r.error || "unknown error", e);
+            } else if (canShowInFolder) {
+                R.showInFolderPath(r.destination);
+            } else {
+                R.copyPath(r.destination, e);
+            }
+        });
+    });
     modalOverlay.classList.remove("hidden");
 }
 
@@ -1932,6 +1982,13 @@ window.R = {
         if (!f || !canShowInFolder) return;
         window.electronAPI.showInFolder(f.path);
     },
+    // Path-based variant for the Rename Results modal: scannedFiles is
+    // already cleared after a successful rename, so an index can't be used —
+    // the result rows carry the destination path directly.
+    showInFolderPath(path) {
+        if (!canShowInFolder || typeof path !== "string" || !path) return;
+        window.electronAPI.showInFolder(path);
+    },
 
     /* Inline conflict resolution (item 7) */
     conflictSkip(ci, j) {
@@ -1999,6 +2056,12 @@ window.R = {
         } else if (m.metadata?.title) {
             html += `<div><strong>Title:</strong> ${esc(m.metadata.title)}</div>`;
             if (m.metadata.year) html += `<div><strong>Year:</strong> ${m.metadata.year}</div>`;
+        }
+        // Which provider supplied the match — "(fallback)" when the selected
+        // source found nothing and the other TV source stepped in. Labeled
+        // "Metadata source" because "Source" below is the release tag (BluRay…).
+        if (m.metadata?.datasource) {
+            html += `<div><strong>Metadata source:</strong> ${esc(m.metadata.datasource.toUpperCase())}${m.metadata.fallback ? " (fallback)" : ""}</div>`;
         }
         
         const f = scannedFiles[idx];

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell, clipboard } = require("electron");
 const { spawn, execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -635,7 +635,72 @@ function findCwd() {
     }
 }
 
+// ── Backend log capture + crash recovery ─────────────────────────────────────
+// Ring buffer of the backend's recent output. When startup fails or the
+// backend keeps dying, the LAST lines are exactly what a bug report needs —
+// today they only reach the terminal nobody launched the app from.
+const PYLOG_MAX = 200;
+const pyLog = [];
+function pushPyLog(chunk) {
+    for (const line of String(chunk).split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        pyLog.push(line);
+        if (pyLog.length > PYLOG_MAX) pyLog.shift();
+    }
+}
+
+let quitting = false;       // set on before-quit: an exiting backend is then expected
+let currentPython = null;   // interpreter in use — needed to restart the backend
+let lastCrashAt = 0;        // Date.now() of the previous unexpected backend exit
+let recovering = false;     // a restart is in flight; don't stack a second one
+
+/**
+ * Unexpected backend exit while the window is open.
+ * First crash (none in the last 60 s): restart it once, transparently —
+ * covers one-off failures (OOM kill, a provider bug crashing uvicorn).
+ * A second death within 60 s means restarting won't help; show the log and
+ * offer Relaunch/Quit instead of leaving a dead UI.
+ */
+async function handleBackendExit() {
+    if (quitting || !mainWindow) return;   // normal shutdown paths
+    if (recovering) return;                // in-flight recovery surfaces the outcome
+    recovering = true;
+    try {
+        const firstCrash = Date.now() - lastCrashAt > 60_000;
+        lastCrashAt = Date.now();
+        if (firstCrash && currentPython) {
+            console.warn("[main] Backend exited unexpectedly — restarting it…");
+            startPython(currentPython);
+            await waitForServer(20_000);
+            console.log("[main] Backend recovered.");
+            if (mainWindow) mainWindow.reload();
+            return;
+        }
+    } catch (err) {
+        console.error("[main] Backend restart failed:", err.message);
+    } finally {
+        recovering = false;
+    }
+
+    // Repeated crash or failed restart — tell the user why, with the log.
+    if (quitting || !mainWindow) return;
+    const r = await dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "CineSort backend stopped",
+        message: "The CineSort backend keeps stopping.",
+        detail: "Last backend output:\n\n" + (pyLog.slice(-30).join("\n") || "(no output captured)"),
+        buttons: ["Relaunch", "Quit"],
+        defaultId: 0,
+        cancelId: 1,
+    });
+    if (r.response === 0) {
+        app.relaunch();
+    }
+    app.quit();
+}
+
 function startPython(python) {
+    currentPython = python;
     const cwd = findCwd();
     console.log(`[main] Starting uvicorn: ${python} in ${cwd}`);
 
@@ -675,11 +740,12 @@ function startPython(python) {
         stdio: ["ignore", "pipe", "pipe"],
     });
 
-    pyProc.stdout.on("data", d => console.log("[py]", d.toString().trim()));
-    pyProc.stderr.on("data", d => console.log("[py]", d.toString().trim()));
+    pyProc.stdout.on("data", d => { console.log("[py]", d.toString().trim()); pushPyLog(d); });
+    pyProc.stderr.on("data", d => { console.log("[py]", d.toString().trim()); pushPyLog(d); });
     pyProc.on("exit", (code) => {
         console.log(`[py] exited with code ${code}`);
         pyProc = null;
+        handleBackendExit();   // no-op on normal quit (quitting / closed window)
     });
 }
 
@@ -844,7 +910,23 @@ app.whenReady().then(async () => {
     try {
         await waitForServer(serverTimeout);
     } catch (err) {
+        // Same UX family as the "Python not found" dialog: never vanish
+        // silently — show WHY, and make the log one click away from a bug
+        // report. (Missing dependency in a user-built venv is the classic
+        // cause, seen live during v1.3.0 rpm testing on Fedora.)
         console.error(err.message);
+        const r = await dialog.showMessageBox({
+            type: "error",
+            title: "CineSort could not start",
+            message: "The backend server did not start.",
+            detail: "Last backend output:\n\n" + (pyLog.slice(-30).join("\n") || "(no output captured)"),
+            buttons: ["Copy details & Quit", "Quit"],
+            defaultId: 0,
+            cancelId: 1,
+        });
+        if (r.response === 0) {
+            clipboard.writeText(pyLog.join("\n") || err.message);
+        }
         app.quit();
         return;
     }
@@ -886,6 +968,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+    quitting = true;   // the backend's SIGTERM exit below is expected — no recovery
     if (pyProc) {
         pyProc.kill("SIGTERM");
     }
@@ -893,6 +976,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+    quitting = true;
     if (pyProc) {
         pyProc.kill("SIGTERM");
     }

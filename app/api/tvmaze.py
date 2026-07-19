@@ -64,11 +64,32 @@ class TVMazeClient:
         return results
 
     async def get_episodes(self, show_id: int) -> list[TVMazeEpisode]:
-        resp = await self._client.get(f"/shows/{show_id}/episodes")
+        # specials=1: TVmaze omits specials by default, so SP/season-0 files
+        # could never match this source. Specials arrive interleaved in air
+        # order with number=null, type "significant_special"/
+        # "insignificant_special", and season set to the SURROUNDING season —
+        # remap them to season 0 with sequential numbering (SP01 = first
+        # special by air date), the same season-0 convention the detector
+        # emits and TMDb already serves. Without the remap a null number
+        # would collapse to (real_season, 0) junk keys.
+        resp = await self._client.get(
+            f"/shows/{show_id}/episodes", params={"specials": "1"}
+        )
         resp.raise_for_status()
         data = resp.json()
         episodes = []
+        special_no = 0
         for ep in data:
+            if ep.get("number") is None or (ep.get("type") or "").endswith("special"):
+                special_no += 1
+                episodes.append(TVMazeEpisode(
+                    season=0,
+                    episode=special_no,
+                    title=ep.get("name", ""),
+                    air_date=ep.get("airdate"),
+                    summary=ep.get("summary", "") or "",
+                ))
+                continue
             episodes.append(TVMazeEpisode(
                 season=ep.get("season", 0),
                 episode=ep.get("number", 0) or 0,

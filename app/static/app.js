@@ -46,6 +46,7 @@ const elTemplate    = $id("template");
 const elSource      = $id("datasource");
 const elAction      = $id("action");
 const elIncludeAdult = $id("include-adult");
+const elDest        = $id("dest-path");
 
 const btnScan   = $id("btn-scan");
 const btnBrowse = $id("btn-browse");
@@ -81,10 +82,19 @@ const statReview       = $id("stat-review");
 /* View filter for the dual pane (All / Matched / Unmatched).
    Filters what is VISIBLE only — selection (checkboxes) decides what renames. */
 let viewFilter = "all";
+/* Text filter (the pane twin of the Browse dialog's "Filter this folder…").
+   Same visibility-only contract as viewFilter; composes with it (AND). */
+let paneFilterText = "";
 function rowHiddenCls(i) {
-    if (viewFilter === "all") return "";
-    const matched = !!(matchResults[i] && matchResults[i].matched);
-    return (viewFilter === "matched") === matched ? "" : " row-hidden";
+    if (viewFilter !== "all") {
+        const matched = !!(matchResults[i] && matchResults[i].matched);
+        if ((viewFilter === "matched") !== matched) return " row-hidden";
+    }
+    if (paneFilterText) {
+        const hay = (scannedFiles[i]?.filename || "") + " " + (matchResults[i]?.new_name || "");
+        if (!hay.toLowerCase().includes(paneFilterText)) return " row-hidden";
+    }
+    return "";
 }
 
 /* Footer action bar: live "N of M files ready", Rename label, Review button. */
@@ -118,6 +128,12 @@ function updateFooter() {
         statReview.classList.toggle("hidden", review === 0);
         statReview.textContent = `${review} review`;
     }
+    // Bulk-selection buttons only make sense once a match has produced rows to
+    // act on — same appear-after-match rule as the high/review chips above.
+    const anyResult = matchResults.some(r => r);
+    for (const id of ["bulk-matched", "bulk-high", "bulk-clear-unmatched"]) {
+        $id(id)?.classList.toggle("hidden", !anyResult);
+    }
 }
 
 /* ─── Start over (brand button) ───────────────────────────── */
@@ -134,6 +150,9 @@ function startOver() {
     focusedIdx = null;
     elScanPath.value = "";
     viewFilter = "all";
+    paneFilterText = "";
+    const pf = $id("pane-filter");
+    if (pf) pf.value = "";
     document.querySelectorAll("#view-filter .seg-btn").forEach(b =>
         b.classList.toggle("on", b.dataset.filter === "all"));
     btnMatch.disabled = true;
@@ -172,6 +191,24 @@ document.querySelectorAll("#view-filter .seg-btn").forEach(b => {
         renderLeft();
         renderRight();
     });
+});
+
+/* Pane text filter. Debounced ~120 ms: both panes fully re-render on change,
+   and typing a word over a 1,000-row batch shouldn't cost one render per
+   keystroke (same reasoning as the template preview's debounce). */
+let _paneFilterTimer = null;
+$id("pane-filter")?.addEventListener("input", e => {
+    clearTimeout(_paneFilterTimer);
+    _paneFilterTimer = setTimeout(() => {
+        paneFilterText = e.target.value.trim().toLowerCase();
+        renderLeft();
+        renderRight();
+    }, 120);
+});
+// Shield the pane shortcuts: Delete over the panes REMOVES files from the
+// batch — keystrokes typed into the filter box must never reach them.
+$id("pane-filter")?.addEventListener("keydown", e => {
+    if (e.key !== "Escape") e.stopPropagation();   // Esc still closes modals
 });
 
 /* ─── First-run key check ─────────────────────────────────── */
@@ -405,12 +442,14 @@ function showLocateDialog(filenames) {
     locateInput.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
 }
 
-function showSelectionDialog(groupName, candidates, filesToMatch) {
+function showSelectionDialog(groupName, candidates, filesToMatch, media) {
+    const isMovie = media === "movie";
     modalTitle.textContent = "Select best match for \"" + groupName + "\"";
-    
-    let html = `<p style="color:var(--txt2);margin-bottom:12px;font-size:12px">Multiple matches found. Select the correct show:</p>`;
+
+    let html = `<p style="color:var(--txt2);margin-bottom:12px;font-size:12px">Multiple matches found. Select the correct ${isMovie ? "movie" : "show"}:</p>`;
     html += `<div class="candidate-list">`;
-    
+
+    let mi = 0;
     for (const c of candidates) {
         const year = c.year ? ` (${c.year})` : "";
         const rating = c.rating ? ` ⭐ ${c.rating.toFixed(1)}` : "";
@@ -424,6 +463,14 @@ function showSelectionDialog(groupName, candidates, filesToMatch) {
             ? `<div style="margin-top:3px">${chipParts.map(t => `<span class="tag">${esc(t)}</span>`).join(" ")}</div>`
             : "";
 
+        // Movie candidates carry STRING ids (OMDb "tt…") — those must never
+        // travel through an inline onclick attribute (the results-modal /
+        // context-menu rule), so movie Select buttons are index-bound
+        // listeners over the candidates array. Series keep the existing
+        // numeric-id inline handler unchanged.
+        const selectBtn = isMovie
+            ? `<button class="glass-btn btn-scan sel-movie" data-mi="${mi++}" style="padding:4px 12px;font-size:11px">Select</button>`
+            : `<button class="glass-btn btn-scan" onclick="R.selectShow(${c.id}, '${esc(c.name).replace(/'/g, "\\'")}', event)" style="padding:4px 12px;font-size:11px">Select</button>`;
         html += `<div class="candidate-item" data-id="${c.id}" data-name="${esc(c.name)}">
             ${poster}
             <div style="flex:1;min-width:0;">
@@ -431,16 +478,24 @@ function showSelectionDialog(groupName, candidates, filesToMatch) {
                 ${chips}
                 ${overview}
             </div>
-            <button class="glass-btn btn-scan" onclick="R.selectShow(${c.id}, '${esc(c.name).replace(/'/g, "\\'")}', event)" style="padding:4px 12px;font-size:11px">Select</button>
+            ${selectBtn}
         </div>`;
     }
-    
+
     html += `</div>`;
     html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:8px">
         <button class="glass-btn" onclick="R.closeModal()" style="flex:1">Cancel</button>
     </div>`;
-    
+
     modalBody.innerHTML = html;
+    if (isMovie) {
+        modalBody.querySelectorAll(".sel-movie").forEach(btn => {
+            btn.addEventListener("click", e => {
+                const c = candidates[Number(btn.dataset.mi)];
+                if (c) R.selectMovie(c.id, c.datasource, e);
+            });
+        });
+    }
     modalOverlay.classList.remove("hidden");
 
     // Store filesToMatch for the selection callback
@@ -544,6 +599,13 @@ function renderConflictsDialog() {
             }
             html += `</div>`;
         });
+        // One-click triage for quality doubles: keep the biggest source
+        // selected, skip the rest. Only for duplicate_destination with ≥2
+        // KNOWN files — "keep largest source" says nothing about a
+        // pre-existing destination (file_exists), so those never get it.
+        if (isDup && c._origs.filter(o => _findIdxByOriginal(o) >= 0).length >= 2) {
+            html += `<button class="glass-btn" style="font-size:10px;padding:3px 8px;margin-top:6px" onclick="R.conflictKeepLargest(${ci})">Keep largest</button>`;
+        }
         html += `</div>`;
     });
 
@@ -558,41 +620,32 @@ function renderConflictsDialog() {
 }
 
 async function handleDroppedPaths(paths) {
+    // Multiple paths: one /api/scan-batch via the same helper the native
+    // picker uses — the backend dedupes overlapping selections by resolved
+    // path (a folder + a file inside it = one row) and the "Include
+    // subfolders" toggle is honored for dropped folders too (the old
+    // per-path loop hardcoded recursive: false). scanPaths owns its own
+    // status line and scan-progress ticker.
+    if (paths.length > 1) {
+        await scanPaths(paths);
+        return;
+    }
+
     status("Scanning dropped files…");
     const gen = sessionGen;
+    const ticker = startScanProgressTicker();
 
-    // If a single directory was dropped, scan it
-    // If multiple files, scan each one individually
-    // We'll try scanning the first path as a directory first
+    // A single dropped directory (or file): scan it
     try {
         // Collect into a local first — only committed to scannedFiles after
         // the sessionGen check below, so "start over" can't be overwritten.
-        let files;
-        // If it's a single folder
-        if (paths.length === 1) {
-            const data = await api("/api/scan", {
-                method: "POST",
-                body: JSON.stringify({ path: paths[0], recursive: elRecursive.checked }),
-            });
-            files = data.files;
-        } else {
-            // Multiple files — scan each parent dir? Or scan individually
-            // Actually send them one by one to scan (which handles single files)
-            const allFiles = [];
-            for (const p of paths) {
-                try {
-                    const data = await api("/api/scan", {
-                        method: "POST",
-                        body: JSON.stringify({ path: p, recursive: false }),
-                    });
-                    allFiles.push(...data.files);
-                } catch { /* skip non-media files */ }
-            }
-            files = allFiles;
-        }
+        const data = await api("/api/scan", {
+            method: "POST",
+            body: JSON.stringify({ path: paths[0], recursive: elRecursive.checked }),
+        });
         if (gen !== sessionGen) return;   // user hit "start over" meanwhile
 
-        scannedFiles = files;
+        scannedFiles = data.files;
         matchResults = [];
         selectedSet = new Set(scannedFiles.map((_, i) => i));
         renderLeft();
@@ -603,6 +656,8 @@ async function handleDroppedPaths(paths) {
         statusDone(`Found ${scannedFiles.length} media file(s)`);
     } catch (err) {
         statusDone("Drop failed: " + err.message);
+    } finally {
+        clearInterval(ticker);
     }
 }
 
@@ -643,6 +698,14 @@ function updateActionHint() {
     const hint = ACTION_HINTS[elAction.value];
     footerHintAction.textContent = hint || "";
     footerHintAction.className = "action-hint-text action-hint-" + elAction.value;
+    // Rename (in-place) never moves files — the destination cannot apply.
+    if (elDest) {
+        const inPlace = elAction.value === "rename";
+        elDest.disabled = inPlace;
+        elDest.title = inPlace
+            ? "Rename (in-place) never moves files — destination not used"
+            : "Optional: build template paths under this folder instead of next to each file";
+    }
 }
 
 elAction.addEventListener("change", () => {
@@ -681,6 +744,7 @@ function persistPrefs() {
             action: elAction.value,
             template: elTemplate.value,
             scanPath: elScanPath.value,
+            destPath: elDest ? elDest.value : "",
             theme: currentTheme(),
         }));
     } catch { /* storage disabled — non-fatal */ }
@@ -695,11 +759,114 @@ function restorePrefs() {
     if (p.action && [...elAction.options].some(o => o.value === p.action)) elAction.value = p.action;
     if (typeof p.template === "string" && p.template) elTemplate.value = p.template;
     if (typeof p.scanPath === "string" && p.scanPath) elScanPath.value = p.scanPath;
+    if (elDest && typeof p.destPath === "string" && p.destPath) elDest.value = p.destPath;
     applyTheme(p.theme || "dark");
 }
 restorePrefs();
 
 updateActionHint(); // run once on load (after prefs restore so it reflects the saved action)
+
+/* ─── Custom template presets ─────────────────────────────────
+   Saved under their own localStorage key (same per-origin persistence as
+   PREFS_KEY — identical in the Electron renderer and any browser). Labels
+   and templates are USER-CONTROLLED strings: buttons are built with
+   createElement + textContent + index closures, never innerHTML — esc()
+   doesn't escape quotes in attribute context, so string-built markup would
+   be injectable here. */
+const CUSTOM_PRESETS_KEY = "cinesort.customPresets";
+const CUSTOM_PRESETS_MAX = 12;
+
+function loadCustomPresets() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(CUSTOM_PRESETS_KEY) || "[]");
+        if (!Array.isArray(raw)) return [];
+        return raw
+            .filter(p => p && typeof p.label === "string" && typeof p.template === "string"
+                          && p.label.trim() && p.template.trim()
+                          && p.label.length <= 24 && p.template.length <= 500)
+            .slice(0, CUSTOM_PRESETS_MAX);
+    } catch { return []; }   // malformed storage degrades to no custom presets
+}
+function saveCustomPresets(list) {
+    try { localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(list)); }
+    catch { /* storage disabled — non-fatal, presets just don't persist */ }
+}
+
+function renderCustomPresets() {
+    const slot = $id("custom-presets");
+    if (!slot) return;
+    slot.textContent = "";
+    const presets = loadCustomPresets();
+    presets.forEach((p, i) => {
+        const btn = document.createElement("button");
+        btn.className = "preset-btn preset-custom";
+        btn.textContent = p.label;
+        btn.title = p.template + "  ·  right-click to remove";
+        btn.addEventListener("click", () => {
+            elTemplate.value = p.template;
+            persistPrefs();
+            updateTemplatePreview();
+        });
+        btn.addEventListener("contextmenu", async e => {
+            e.preventDefault();
+            if (!await confirmDialog(`Remove preset "${p.label}"?`, { okText: "Remove", danger: true })) return;
+            const list = loadCustomPresets();
+            list.splice(i, 1);
+            saveCustomPresets(list);
+            renderCustomPresets();
+            status(`Preset removed: ${p.label}`);
+            setTimeout(() => statusHide(), 1500);
+        });
+        slot.appendChild(btn);
+    });
+}
+
+$id("template-save")?.addEventListener("click", () => {
+    const tpl = elTemplate.value.trim();
+    if (!tpl) { elTemplate.focus(); return; }
+    const list = loadCustomPresets();
+    if (list.length >= CUSTOM_PRESETS_MAX) {
+        status(`Preset limit reached (${CUSTOM_PRESETS_MAX}) — right-click one to remove it first`);
+        setTimeout(() => statusHide(), 2500);
+        return;
+    }
+    modalTitle.textContent = "Save preset";
+    modalBody.innerHTML = `
+        <p style="color:var(--txt2);font-size:12px;margin-bottom:8px">
+            Name for this template preset:</p>
+        <code style="display:block;font-size:11px;color:var(--txt3);margin-bottom:10px;word-break:break-all" id="save-preset-tpl"></code>
+        <div style="display:flex;gap:8px">
+            <input type="text" id="preset-name" class="glass-input" style="flex:1" maxlength="24" spellcheck="false">
+            <button class="glass-btn btn-scan" id="preset-name-ok">Save preset</button>
+        </div>
+        <p style="font-size:10px;color:var(--txt3);margin-top:8px">Saving under an existing name replaces it. Right-click a saved preset to remove it.</p>`;
+    // textContent, not markup — the template is user input.
+    $id("save-preset-tpl").textContent = tpl;
+    const nameEl = $id("preset-name");
+    nameEl.value = tpl.slice(0, 18);
+    modalOverlay.classList.remove("hidden");
+    nameEl.focus();
+    nameEl.select();
+
+    const commit = () => {
+        const label = nameEl.value.trim().slice(0, 24);
+        if (!label) { nameEl.focus(); return; }
+        const fresh = loadCustomPresets().filter(p => p.label !== label);
+        fresh.push({ label, template: tpl });
+        saveCustomPresets(fresh);
+        renderCustomPresets();
+        R.closeModal();
+        status(`Preset saved: ${label}`);
+        setTimeout(() => statusHide(), 1500);
+    };
+    $id("preset-name-ok").addEventListener("click", commit);
+    nameEl.addEventListener("keydown", e => {
+        e.stopPropagation();   // shield the pane shortcuts, as every modal input does
+        if (e.key === "Enter") { e.preventDefault(); commit(); }
+    });
+});
+
+renderCustomPresets();   // initial render from storage
 
 /* Rebuild the Action dropdown from the backend (GET /api/actions) so the
    option list always mirrors the RenameAction enum — the hardcoded HTML list
@@ -728,6 +895,7 @@ updateActionHint(); // run once on load (after prefs restore so it reflects the 
 
 
 elScanPath.addEventListener("keydown", e => { if (e.key === "Enter") doScan(); });
+elDest?.addEventListener("input", persistPrefs);
 // The toolbar Scan button previously had no handler — clicking it did nothing
 // (scan only worked via Enter in the path field or the Browse dialog). Wire it.
 btnScan.addEventListener("click", doScan);
@@ -751,6 +919,7 @@ btnBrowse.addEventListener("click", () => {
 async function scanPaths(paths) {
     status(`Scanning ${paths.length} item(s)…`);
     const gen = sessionGen;
+    const ticker = startScanProgressTicker();
     try {
         const data = await api("/api/scan-batch", {
             method: "POST",
@@ -770,6 +939,8 @@ async function scanPaths(paths) {
         statusDone(`Found ${scannedFiles.length} media file(s)`);
     } catch (err) {
         statusDone("Scan failed: " + err.message);
+    } finally {
+        clearInterval(ticker);
     }
 }
 
@@ -1093,6 +1264,7 @@ async function doScan() {
     status("Scanning…");
     btnScan.disabled = true;
     const gen = sessionGen;
+    const ticker = startScanProgressTicker();
 
     try {
         const data = await api("/api/scan", {
@@ -1114,6 +1286,7 @@ async function doScan() {
     } catch (err) {
         statusDone("Scan failed: " + err.message);
     } finally {
+        clearInterval(ticker);
         btnScan.disabled = false;
     }
 }
@@ -1156,6 +1329,22 @@ function startRenameProgressTicker() {
     }, 1000);
 }
 
+/* Scan twin of the two tickers above — totals are unknowable up front, so
+   the bar stays indeterminate and the text counts upward:
+   "Scanning… 1,240 items · 312 media files". */
+function startScanProgressTicker() {
+    return setInterval(async () => {
+        try {
+            const p = await api("/api/scan-progress");
+            if (p.active) {
+                statusText.textContent =
+                    `Scanning… ${p.seen.toLocaleString()} items · ${p.media.toLocaleString()} media files`;
+                progressFill.classList.add("loading");
+            }
+        } catch { /* transient poll failure — keep last rendered state */ }
+    }, 1000);
+}
+
 async function doMatch() {
     if (scannedFiles.length === 0) return;
 
@@ -1180,6 +1369,7 @@ async function doMatch() {
                 datasource: elSource.value,
                 template: elTemplate.value,
                 include_adult: elIncludeAdult.checked,
+                    output_dir: elDest?.value.trim() || null,
             }),
         });
         if (gen !== sessionGen) return;   // user hit "start over" meanwhile
@@ -1188,7 +1378,7 @@ async function doMatch() {
         // Check if we need user to select from multiple shows
         if (data.needs_selection) {
             statusHide();
-            showSelectionDialog(data.group_name, data.candidates, filesToMatch);
+            showSelectionDialog(data.group_name, data.candidates, filesToMatch, data.media);
             return;
         }
 
@@ -1280,6 +1470,14 @@ function showRenameResults(data) {
     modalTitle.textContent = `Rename Results — ${data.action}`;
     let html = `<p style="margin-bottom:10px;color:var(--txt2)">
         ${data.success} succeeded, ${data.failed} failed of ${data.total}</p>`;
+    // Undo at the point of regret: revert the whole batch right from the
+    // results. Only when something actually changed on disk — dry runs and
+    // all-failed batches get no button. R.undoBatch owns the confirm dialog,
+    // the API call, and the History follow-up.
+    if (data.batch_id && data.success > 0 && data.action !== "test") {
+        html += `<button class="glass-btn" id="res-undo-all"
+                style="margin-bottom:10px;padding:4px 12px;font-size:11px">Undo all (${data.success})</button>`;
+    }
     // Per-row action: verify where the file landed with one click. Desktop
     // reveals it via the existing shell:showItem IPC; Docker/browser falls
     // back to Copy path — the same graceful degradation the context menu uses.
@@ -1303,6 +1501,7 @@ function showRenameResults(data) {
         }
     });
     modalBody.innerHTML = html;
+    $id("res-undo-all")?.addEventListener("click", () => R.undoBatch(data.batch_id));
     // Real listeners over data.results — not inline onclick with a quoted
     // path, which would break (and be attribute-injectable) for filenames
     // containing quotes/apostrophes ("Ocean's Eleven").
@@ -1584,6 +1783,103 @@ if (isElectron && window.electronAPI && typeof window.electronAPI.onUpdateRestar
 const btnSettings = $id("btn-settings");
 btnSettings.addEventListener("click", () => showSettings());
 
+/* ─── Watch folders card (Settings) ────────────────────────────
+   Folders/templates/destinations are USER strings — every element is built
+   with createElement + textContent/value, never innerHTML (the F38 rule). */
+async function renderWatchesCard() {
+    const slot = $id("watches-card-slot");
+    if (!slot) return;
+    let data, logData;
+    try {
+        [data, logData] = await Promise.all([api("/api/watches"), api("/api/watch-log")]);
+    } catch { return; }   // backend unreachable — card simply absent
+    if (!$id("watches-card-slot")) return;   // modal changed meanwhile
+
+    const watches = data.watches || [];
+    const mk = (tag, props = {}, style = "") => {
+        const el = document.createElement(tag);
+        Object.assign(el, props);
+        if (style) el.style.cssText = style;
+        return el;
+    };
+    const shield = el => el.addEventListener("keydown", e => { if (e.key !== "Escape") e.stopPropagation(); });
+
+    slot.textContent = "";
+    const card = mk("div", { className: "settings-row" });
+    card.appendChild(mk("div", { className: "settings-label", textContent: "Watch folders" }));
+    card.appendChild(mk("p", { className: "settings-hint", textContent:
+        `Auto-organize: each enabled folder is checked every ${Math.round(data.interval || 60)} s; ` +
+        `new files that match confidently are renamed automatically — every run is undoable from History. ` +
+        `Ambiguous titles are skipped until you match them once manually. Watches run while CineSort is open.` }));
+
+    const rows = mk("div", {}, "display:flex;flex-direction:column;gap:8px");
+    const sources = [["tmdb", "TMDb"], ["tvmaze", "TVmaze"], ["omdb", "OMDb"], ["musicbrainz", "MusicBrainz"]];
+    const actions = [["move", "Move"], ["copy", "Copy"], ["hardlink", "Hard Link"], ["symlink", "Symlink"], ["keeplink", "Move + Keep Link"]];
+
+    function addRow(w) {
+        const row = mk("div", {}, "display:flex;flex-wrap:wrap;gap:6px;align-items:center;" +
+            "padding:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px");
+        const enabled = mk("input", { type: "checkbox", checked: w.enabled !== false, title: "Enabled" });
+        const folder = mk("input", { className: "glass-input mono", value: w.folder || "", placeholder: "/path/to/downloads", spellcheck: false }, "flex:2;min-width:160px;font-size:11px");
+        const src = mk("select", { className: "glass-select" }, "font-size:11px");
+        sources.forEach(([v, l]) => src.appendChild(mk("option", { value: v, textContent: l, selected: v === (w.datasource || "tvmaze") })));
+        const tpl = mk("input", { className: "glass-input mono", value: w.template || elTemplate.value, placeholder: "{name}/Season {s}/…", spellcheck: false }, "flex:2;min-width:160px;font-size:11px");
+        const act = mk("select", { className: "glass-select" }, "font-size:11px");
+        actions.forEach(([v, l]) => act.appendChild(mk("option", { value: v, textContent: l, selected: v === (w.action || "move") })));
+        const dest = mk("input", { className: "glass-input mono", value: w.output_dir || "", placeholder: "Destination (optional)", spellcheck: false }, "flex:2;min-width:160px;font-size:11px");
+        const rm = mk("button", { className: "glass-btn", textContent: "Remove" }, "font-size:10px;padding:3px 8px");
+        rm.addEventListener("click", () => row.remove());
+        [folder, tpl, dest].forEach(shield);
+        row.append(enabled, folder, src, tpl, act, dest, rm);
+        row._collect = () => ({
+            enabled: enabled.checked, folder: folder.value.trim(),
+            datasource: src.value, template: tpl.value.trim(),
+            action: act.value, output_dir: dest.value.trim(),
+        });
+        rows.appendChild(row);
+    }
+    watches.forEach(addRow);
+    card.appendChild(rows);
+
+    const btns = mk("div", {}, "display:flex;gap:8px;margin-top:8px;align-items:center");
+    const addBtn = mk("button", { className: "glass-btn", textContent: "Add watch" }, "font-size:11px");
+    addBtn.addEventListener("click", () => addRow({
+        folder: "", datasource: elSource.value === "musicbrainz" ? "tvmaze" : elSource.value,
+        template: elTemplate.value, action: "move",
+        output_dir: elDest ? elDest.value.trim() : "", enabled: true,
+    }));
+    const saveBtn = mk("button", { className: "glass-btn btn-scan", textContent: "Save watches" }, "font-size:11px");
+    const msg = mk("span", {}, "font-size:11px;min-height:14px");
+    saveBtn.addEventListener("click", async () => {
+        const list = [...rows.children].map(r => r._collect()).filter(w => w.folder);
+        saveBtn.disabled = true;
+        try {
+            await api("/api/watches", { method: "POST", body: JSON.stringify({ watches: list }) });
+            msg.style.color = "var(--green)";
+            msg.textContent = "Saved.";
+            renderWatchesCard();   // re-render normalized state + fresh log
+        } catch (err) {
+            msg.style.color = "var(--red)";
+            msg.textContent = err.message;
+        } finally {
+            saveBtn.disabled = false;
+        }
+    });
+    btns.append(addBtn, saveBtn, msg);
+    card.appendChild(btns);
+
+    const log = (logData.log || []).slice(-5).reverse();
+    if (log.length) {
+        const logBox = mk("div", {}, "margin-top:8px;font-size:10px;color:var(--txt3);line-height:1.6");
+        logBox.appendChild(mk("div", { textContent: "Recent activity:" }, "font-weight:600"));
+        for (const l of log) {
+            logBox.appendChild(mk("div", { textContent: `${l.ts}  ${Path.basename(l.folder)} — ${l.message}` }));
+        }
+        card.appendChild(logBox);
+    }
+    slot.appendChild(card);
+}
+
 async function showSettings(scrollTo) {
     modalTitle.textContent = "Settings";
     modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:var(--txt3)">Loading…</div>`;
@@ -1675,6 +1971,8 @@ async function showSettings(scrollTo) {
                    maxlength="5" autocomplete="off" spellcheck="false">
         </div>
 
+        <div id="watches-card-slot"></div>
+
         <div id="update-card-slot"></div>
 
         <div style="display:flex;gap:8px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
@@ -1683,6 +1981,9 @@ async function showSettings(scrollTo) {
         </div>
         <p id="settings-msg" style="font-size:11px;margin-top:10px;min-height:16px"></p>
         <p id="settings-version" style="font-size:11px;margin-top:4px;color:var(--txt3)"></p>`;
+
+    // Watch-folders card (best-effort, like the update card below).
+    renderWatchesCard();
 
     // Software update card + version footer (best-effort; the modal works
     // without it). One shared endpoint on every build target; only the
@@ -1780,21 +2081,39 @@ async function showHistory(limit) {
             return;
         }
 
+        // Entries in RENDER order — .hist-act buttons carry data-h indices
+        // into this array so paths/errors never travel through onclick
+        // attributes (the F11 results-modal pattern; esc() doesn't escape
+        // quotes, so attribute-quoted paths break on apostrophes).
+        const flat = [];
         const rowHtml = (e) => {
+            const hIdx = flat.push(e) - 1;
             const time = new Date(e.timestamp).toLocaleString();
             const actionColor = e.action === "move" ? "var(--green)" : e.action === "copy" ? "var(--info)" : "var(--amber)";
             const statusIcon = e.success ? "✓" : "✗";
             const statusColor = e.success ? "var(--green)" : "var(--red)";
-            let h = `<div style="padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px">`;
+            // Basenames keep rows scannable; the tooltip carries the full paths.
+            let h = `<div style="padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px" title="${esc(e.original)} → ${esc(e.destination)}">`;
             h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">`;
             h += `<div style="display:flex;gap:8px;align-items:center">`;
             h += `<span style="color:${statusColor};font-weight:600">${statusIcon}</span>`;
             h += `<span style="color:${actionColor};font-weight:500;font-size:11px;text-transform:uppercase">${e.action}</span>`;
             h += `<span style="color:var(--txt3);font-size:10px">${time}</span>`;
             h += `</div>`;
+            h += `<div style="display:flex;gap:6px;align-items:center">`;
+            // Per-row action mirroring the Rename Results modal: reveal/copy the
+            // destination (for undo entries that's where the file went BACK to),
+            // or copy the error. Test rows changed nothing on disk — no button.
+            const actLabel = e.success
+                ? (e.action === "test" ? "" : (canShowInFolder ? "Show in folder" : "Copy path"))
+                : "Copy error";
+            if (actLabel) {
+                h += `<button class="glass-btn hist-act" data-h="${hIdx}" style="padding:3px 10px;font-size:10px">${actLabel}</button>`;
+            }
             if (e.success && e.action !== "test" && e.action !== "undo") {
                 h += `<button class="glass-btn" onclick="R.undoOperation('${e.id}')" style="padding:3px 10px;font-size:10px">Undo</button>`;
             }
+            h += `</div>`;
             h += `</div>`;
             h += `<div style="font-size:10px;color:var(--txt3);line-height:1.6">`;
             h += `<div>From: ${esc(Path.basename(e.original))}</div>`;
@@ -1849,6 +2168,20 @@ async function showHistory(limit) {
         html += `</div>`;
 
         modalBody.innerHTML = html;
+        // Same dispatch as the results modal's .res-act buttons.
+        modalBody.querySelectorAll(".hist-act").forEach(btn => {
+            btn.addEventListener("click", (ev) => {
+                const e = flat[Number(btn.dataset.h)];
+                if (!e) return;
+                if (!e.success) {
+                    R.copyPath(e.error || "unknown error", ev);
+                } else if (canShowInFolder) {
+                    R.showInFolderPath(e.destination);
+                } else {
+                    R.copyPath(e.destination, ev);
+                }
+            });
+        });
     } catch (err) {
         modalBody.innerHTML = `<div style="text-align:center;padding:20px;color:var(--red)">Failed to load history: ${esc(err.message)}</div>`;
     }
@@ -1883,7 +2216,7 @@ function renderLeft() {
         const checked = selectedSet.has(i) ? "checked" : "";
         const dimCls = selectedSet.has(i) ? "" : " row-dim";
         const sizeTag = f.size ? `<span class="tag tag-size" title="File size">${fmt(f.size)}</span>` : "";
-        const musicTag = f.media_type === "music" ? `<span class="tag music" title="Audio file — use the MusicBrainz source">♪</span>` : "";
+        const musicTag = f.media_type === "music" ? `<span class="tag music" title="Audio file — matches via MusicBrainz">♪</span>` : "";
         // Detection details (type, SxE, quality) live in the row tooltip and
         // the "View metadata" dialog; rows stay clean: checkbox + name + size.
         const tip = [f.path,
@@ -2073,11 +2406,35 @@ function renderGutter() {
 
 /* ─── Context menu ─────────────────────────────────────────── */
 let contextMenu = null;
+// Row the open menu refers to. Items carry only a data-act marker and the
+// dispatcher below reads these — no filename or path ever travels through an
+// HTML attribute (esc() doesn't escape quotes, so inline onclick with a
+// quoted path broke — and was attribute-injectable — for names like
+// "Ocean's Eleven"; same bug class the results modal fixed with listeners).
+let ctxIdx = null, ctxPane = null;
 
 function createContextMenu() {
     const menu = document.createElement("div");
     menu.className = "context-menu glass-panel";
     menu.style.display = "none";
+    // ONE delegated listener for every menu item, bound once at creation —
+    // innerHTML rebuilds on each open can never detach it.
+    menu.addEventListener("click", e => {
+        const item = e.target.closest("[data-act]");
+        if (!item || item.classList.contains("ctx-disabled")) return;
+        const act = item.dataset.act;
+        hideContextMenu();
+        const f = scannedFiles[ctxIdx];
+        switch (act) {
+            case "remove": R.removeFile(ctxIdx); break;
+            case "copy":   if (f) R.copyPath(f.path, e); break;
+            case "reveal": R.showInFolder(ctxIdx); break;
+            case "search": R.searchMetadata(ctxIdx); break;
+            case "edit":   R.startInlineEdit(ctxIdx); break;
+            case "meta":   R.showMetadata(ctxIdx); break;
+            case "clear":  R.clearManual(ctxIdx); break;
+        }
+    });
     document.body.appendChild(menu);
     return menu;
 }
@@ -2086,34 +2443,36 @@ function showContextMenu(e, idx, pane) {
     e.preventDefault();
     focusRow(idx); // focus the right-clicked row so DEL works for the next one
     if (!contextMenu) contextMenu = createContextMenu();
-    
+    ctxIdx = idx;
+    ctxPane = pane;
+
     const f = scannedFiles[idx];
     const m = matchResults[idx];
-    
-    let html = `<div class="ctx-item ctx-delete" onclick="R.removeFile(${idx})"><span>🗑 Remove from list</span><kbd>Del</kbd></div>`;
+
+    let html = `<div class="ctx-item ctx-delete" data-act="remove"><span>🗑 Remove from list</span><kbd>Del</kbd></div>`;
     html += `<div class="ctx-sep"></div>`;
     if (pane === "left" && f) {
-        html += `<div class="ctx-item" onclick="R.copyPath('${esc(f.path)}', event)">📋 Copy path</div>`;
+        html += `<div class="ctx-item" data-act="copy">📋 Copy path</div>`;
         // "Show in folder" works only on desktop (Electron exposes shell). In
         // Docker/browser there is no OS file manager to reveal into, so it stays
         // disabled rather than silently doing nothing.
         if (canShowInFolder) {
-            html += `<div class="ctx-item" onclick="R.showInFolder(${idx})">📁 Show in folder</div>`;
+            html += `<div class="ctx-item" data-act="reveal">📁 Show in folder</div>`;
         } else {
             html += `<div class="ctx-item ctx-disabled" title="Available in the desktop app">📁 Show in folder</div>`;
         }
     }
     if (pane === "right") {
-        html += `<div class="ctx-item" onclick="R.searchMetadata(${idx})">🔍 Search metadata…</div>`;
-        html += `<div class="ctx-item" onclick="R.startInlineEdit(${idx});R.hideMenu()"><span>✏ Edit name manually</span><kbd>F2</kbd></div>`;
+        html += `<div class="ctx-item" data-act="search">🔍 Search metadata…</div>`;
+        html += `<div class="ctx-item" data-act="edit"><span>✏ Edit name manually</span><kbd>F2</kbd></div>`;
         if (m && m.matched && !m.manual) {
-            html += `<div class="ctx-item" onclick="R.showMetadata(${idx})">ℹ️ View metadata</div>`;
+            html += `<div class="ctx-item" data-act="meta">ℹ️ View metadata</div>`;
         }
         if (m && m.matched && m.manual) {
-            html += `<div class="ctx-item" onclick="R.clearManual(${idx})">↺ Clear manual name</div>`;
+            html += `<div class="ctx-item" data-act="clear">↺ Clear manual name</div>`;
         }
     }
-    
+
     contextMenu.innerHTML = html;
     contextMenu.style.display = "block";
     contextMenu.style.left = e.pageX + "px";
@@ -2179,6 +2538,33 @@ window.R = {
         status(`Skipped ${Path.basename(orig)}`);
         setTimeout(() => statusHide(), 1500);
     },
+    /* Keep largest: one-click duplicate triage. Keeps the biggest known
+       source SELECTED and deselects the rest (Skip's mechanism, applied in
+       bulk) — smaller files stay in the list, unchecked, one click away from
+       reversal. First wins ties, and the status says so. */
+    conflictKeepLargest(ci) {
+        const c = _activeConflicts[ci];
+        if (!c || c.type !== "duplicate_destination") return;
+        const known = c._origs
+            .map(orig => _findIdxByOriginal(orig))
+            .filter(idx => idx >= 0);
+        if (known.length < 2) return;   // rows were removed meanwhile — nothing to triage
+        let maxIdx = known[0];
+        for (const idx of known) {
+            if ((scannedFiles[idx].size || 0) > (scannedFiles[maxIdx].size || 0)) maxIdx = idx;
+        }
+        const tie = known.some(idx => idx !== maxIdx
+            && (scannedFiles[idx].size || 0) === (scannedFiles[maxIdx].size || 0));
+        for (const idx of known) {
+            if (idx !== maxIdx) selectedSet.delete(idx);
+        }
+        _activeConflicts.splice(ci, 1);
+        renderLeft();
+        renderRight();
+        renderConflictsDialog();
+        status(`Kept largest: ${Path.basename(scannedFiles[maxIdx].path)}${tie ? " (tie — kept first)" : ""}`);
+        setTimeout(() => statusHide(), 2000);
+    },
     conflictBump(ci, j) {
         const c = _activeConflicts[ci];
         if (!c) return;
@@ -2223,22 +2609,40 @@ window.R = {
         
         modalTitle.textContent = "Metadata";
         let html = `<div style="line-height:1.8;color:var(--txt2);font-size:12px">`;
-        
+
+        // Identity block: the fields that answer "is this the right match?".
+        // Built separately so it can sit beside the poster when one exists.
+        let idFields = "";
         if (m.metadata?.show) {
-            html += `<div><strong>Show:</strong> ${esc(m.metadata.show)}</div>`;
-            html += `<div><strong>Season:</strong> ${m.metadata.season} <strong>Episode:</strong> ${m.metadata.episode}</div>`;
-            if (m.metadata.title) html += `<div><strong>Title:</strong> ${esc(m.metadata.title)}</div>`;
+            idFields += `<div><strong>Show:</strong> ${esc(m.metadata.show)}</div>`;
+            idFields += `<div><strong>Season:</strong> ${m.metadata.season} <strong>Episode:</strong> ${m.metadata.episode}</div>`;
+            if (m.metadata.title) idFields += `<div><strong>Title:</strong> ${esc(m.metadata.title)}</div>`;
         } else if (m.metadata?.title) {
-            html += `<div><strong>Title:</strong> ${esc(m.metadata.title)}</div>`;
-            if (m.metadata.year) html += `<div><strong>Year:</strong> ${m.metadata.year}</div>`;
+            idFields += `<div><strong>Title:</strong> ${esc(m.metadata.title)}</div>`;
+            if (m.metadata.year) idFields += `<div><strong>Year:</strong> ${m.metadata.year}</div>`;
+        }
+        // Episode synopsis / movie plot — providers sent it, show it where
+        // the user verifies the match.
+        if (m.metadata?.overview) {
+            idFields += `<div style="font-size:11px;color:var(--txt3);margin-top:4px;line-height:1.5">${esc(m.metadata.overview)}</div>`;
         }
         // Which provider supplied the match — "(fallback)" when the selected
         // source found nothing and the other TV source stepped in. Labeled
         // "Metadata source" because "Source" below is the release tag (BluRay…).
         if (m.metadata?.datasource) {
-            html += `<div><strong>Metadata source:</strong> ${esc(m.metadata.datasource.toUpperCase())}${m.metadata.fallback ? " (fallback)" : ""}</div>`;
+            idFields += `<div><strong>Metadata source:</strong> ${esc(m.metadata.datasource.toUpperCase())}${m.metadata.fallback ? " (fallback)" : ""}</div>`;
         }
-        
+        if (m.metadata?.poster) {
+            // Same esc(url)-in-src pattern the disambiguation/search dialogs use.
+            html += `<div style="display:flex;gap:12px;align-items:flex-start">
+                <img src="${esc(m.metadata.poster)}" alt=""
+                     style="width:92px;height:138px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--surface-2)">
+                <div style="flex:1;min-width:0">${idFields}</div>
+            </div>`;
+        } else {
+            html += idFields;
+        }
+
         const f = scannedFiles[idx];
         if (f) {
             html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">`;
@@ -2411,49 +2815,80 @@ window.R = {
             return;
         }
 
-        // Movie: format via the same template engine the real rename uses.
-        R.closeModal();
-        let preview;
+        // Movie: re-match through the backend by exact id — the SAME
+        // pipeline auto-matches use, so {tmdbid}/{imdbid}/{y}, score_detail,
+        // poster and overview all come out real. (The old client-side
+        // formatting forced score 1.0, emptied the id tokens, and duplicated
+        // build_new_path's sanitize in JS.)
+        window._pendingMatchFiles = [f];
+        await R.selectMovie(c.id, c.datasource);
+    },
+
+    /* Movie twin of selectShow: re-POST /api/match with the exact picked id.
+       Merge like selectShow — but do NOT run the confidence gate over the
+       picked rows: an explicit pick is consent. The score stays honest
+       (name-similarity against a deliberately-picked title can be low); the
+       SELECTION reflects the user's decision. */
+    async selectMovie(movieId, movieSource, e) {
+        if (e && e.target) {
+            e.target.disabled = true;
+            e.target.textContent = "Loading...";
+        }
+        modalOverlay.classList.add("hidden");
+        status("Matching…");
+
+        const filesToMatch = window._pendingMatchFiles || [];
+        const ticker = startMatchProgressTicker();
+        const gen = sessionGen;
+
         try {
-            const data = await api("/api/preview-template", {
+            const data = await api("/api/match", {
                 method: "POST",
                 body: JSON.stringify({
+                    files: filesToMatch,
+                    datasource: elSource.value,
                     template: elTemplate.value,
-                    sample: { ...f, clean_name: c.title, year: c.year, title: c.title },
+                    include_adult: elIncludeAdult.checked,
+                    output_dir: elDest?.value.trim() || null,
+                    selected_movie_id: String(movieId),
+                    selected_movie_source: movieSource,
                 }),
             });
-            preview = data.preview;
-        } catch (err) {
-            statusDone("Template failed: " + err.message);
-            return;
-        }
-        const dot = f.filename.lastIndexOf(".");
-        const ext = dot > 0 ? f.filename.slice(dot) : "";
-        // Sanitize each path segment the way build_new_path() does server-side.
-        const parts = preview.split("/").filter(Boolean).map(s =>
-            s.replace(/[<>:"\\|?*]/g, "").replace(/[\x00-\x1f]/g, "").replace(/\s+/g, " ").trim()
-        ).filter(Boolean);
-        if (parts.length === 0) { statusDone("Template produced an empty name"); return; }
-        const fileName = parts.pop() + ext;
-        const parentDir = f.path.lastIndexOf("/") > 0 ? f.path.slice(0, f.path.lastIndexOf("/")) : ".";
-        const newPath = [parentDir, ...parts, fileName].join("/");
+            if (gen !== sessionGen) return;   // user hit "start over" meanwhile
 
-        matchResults[idx] = {
-            matched: true,
-            manual: false,
-            score: 1.0,
-            original: f.path,
-            new_name: fileName,
-            new_path: newPath,
-            preview: [...parts, fileName].join("/"),
-            metadata: { title: c.title, year: c.year, poster: c.poster },
-        };
-        selectedSet.add(idx);
-        renderLeft();
-        renderRight();
-        renderGutter();
-        updateFooter();
-        statusDone(`Matched manually: ${c.title}${c.year ? " (" + c.year + ")" : ""}`);
+            if (matchResults.length !== scannedFiles.length) {
+                matchResults = new Array(scannedFiles.length).fill(null);
+            }
+            const resultMap = new Map();
+            for (const r of data.results) {
+                resultMap.set(r.original, r);
+            }
+            let matched = 0, name = "";
+            for (let i = 0; i < scannedFiles.length; i++) {
+                const r = resultMap.get(scannedFiles[i].path);
+                if (r) {
+                    matchResults[i] = r;
+                    if (r.matched) {
+                        matched++;
+                        name = r.metadata?.title || name;
+                        selectedSet.add(i);   // explicit pick = consent
+                    }
+                }
+            }
+            renderLeft();
+            renderRight();
+            renderGutter();
+            updateFooter();
+            statusDone(matched
+                ? `Matched ${matched} file(s) with ${name}`
+                : "Match failed — the selected movie could not be fetched");
+        } catch (err) {
+            statusDone("Match failed: " + err.message);
+        } finally {
+            clearInterval(ticker);
+        }
+
+        delete window._pendingMatchFiles;
     },
 
     async selectShow(showId, showName, e) {
@@ -2477,6 +2912,7 @@ window.R = {
                     datasource: elSource.value,
                     template: elTemplate.value,
                     include_adult: elIncludeAdult.checked,
+                    output_dir: elDest?.value.trim() || null,
                     selected_show_id: showId,
                     selected_show_name: showName,
                 }),
@@ -2766,7 +3202,11 @@ btnGoTop?.addEventListener("click", () => {
 });
 
 /* ─── Template presets ────────────────────────────────────── */
-document.querySelectorAll(".preset-btn").forEach(btn => {
+/* [data-template] scope: custom saved presets (renderCustomPresets) share
+   the .preset-btn class for styling but carry their template in a closure,
+   not a data attribute — binding this handler to them would clobber the
+   applied value with the string "undefined". */
+document.querySelectorAll(".preset-btn[data-template]").forEach(btn => {
     btn.addEventListener("click", () => {
         elTemplate.value = btn.dataset.template;
         persistPrefs();

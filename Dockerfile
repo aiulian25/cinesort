@@ -10,7 +10,7 @@ FROM python:${PYTHON_VERSION}-slim
 
 LABEL maintainer="CineSort <app@cinesort.local>"
 LABEL description="Professional media file organizer with smart metadata matching"
-LABEL version="1.3.8"
+LABEL version="1.4.0"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -59,9 +59,10 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # Expose web UI port
 EXPOSE 8888
 
-# Health check - verify API is responding
+# Health check - verify API is responding. Shell form: ${CINESORT_PORT} is
+# expanded by /bin/sh at CHECK time, so the probe follows a custom port.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8888/ || exit 1
+    CMD curl -f http://localhost:${CINESORT_PORT:-8888}/ || exit 1
 
 # Volume for persistent data
 VOLUME ["/data", "/media"]
@@ -69,5 +70,6 @@ VOLUME ["/data", "/media"]
 # Set entrypoint
 ENTRYPOINT ["docker-entrypoint.sh"]
 
-# Default command
+# Default command. If this line changes, update the exact-match string in
+# docker-entrypoint.sh that rewrites it to honor CINESORT_HOST/CINESORT_PORT.
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8888"]

@@ -35,11 +35,14 @@ from app.core.detector import (
     VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, AUDIO_EXTENSIONS,
     extract_subtitle_lang_tag,
 )
-from app.core.matcher import cascade_score, cascade_breakdown, name_similarity, METRIC_LABELS
+from app.core.matcher import (
+    cascade_score, cascade_breakdown, name_similarity, normalize, METRIC_LABELS,
+)
 from app.core.formatter import apply_template, build_new_path, TEMPLATES, sanitize_filename
 from app.core.renamer import execute_rename, RenameAction, RenameResult
-from app.core.history import history, HistoryEntry
+from app.core.history import history, HistoryEntry, _prune_empty_dirs, _common_ancestor
 from app.core.config import load_config, save_config, read_config_status, config_file
+from app.core.watches import load_watches, save_watches
 from app.api.tmdb import TMDbClient
 from app.api.tvmaze import TVMazeClient
 from app.api.omdb import OMDbClient
@@ -55,7 +58,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.3.8")
+app = FastAPI(title="CineSort", version="1.4.0")
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -96,6 +99,15 @@ match_progress = {"active": False, "current": 0, "total": 0, "group": "", "files
 # without a lock because each field assignment is GIL-atomic and readers
 # only render a transient status line.
 rename_progress = {"active": False, "current": 0, "total": 0, "file": ""}
+
+# Third copy of the pattern, for the current scan (GET /api/scan-progress).
+# A NAS/SMB walk takes minutes (see scan_directory) and used to look frozen.
+# Totals are unknowable up front, so this counts upward: filesystem entries
+# seen and media files found. Counters only — no paths — so a network-exposed
+# Docker instance leaks nothing through the unauthenticated snapshot. The
+# Scan button is disabled while a scan runs (same serialization argument as
+# above); worker-thread writes are GIL-atomic per field.
+scan_progress = {"active": False, "seen": 0, "media": 0}
 
 
 @app.get("/")
@@ -152,6 +164,16 @@ class MatchRequest(BaseModel):
     template: Optional[str] = None
     selected_show_id: Optional[int] = None  # User-selected show ID (bypasses search)
     selected_show_name: Optional[str] = None  # User-selected show name
+    # Movie twin of selected_show_id (str: TMDb ids are ints, OMDb's are
+    # "tt…"). When set, the movie branch fetches that exact record instead of
+    # searching — the movie disambiguation dialog and the manual
+    # Search-metadata pick both re-request through this.
+    selected_movie_id: Optional[str] = None
+    selected_movie_source: Optional[str] = None  # "tmdb" | "omdb"
+    # Optional destination base: template paths materialize under this folder
+    # instead of next to the source ("sort Downloads into the library").
+    # None/empty = today's in-place behavior.
+    output_dir: Optional[str] = None
     include_adult: bool = False  # Pass through to TMDB; OMDb never filters adult content
 
     @field_validator("datasource")
@@ -161,6 +183,29 @@ class MatchRequest(BaseModel):
         if v not in allowed:
             raise ValueError(f"datasource must be one of: {allowed}")
         return v
+
+    @field_validator("selected_movie_source")
+    @classmethod
+    def validate_movie_source(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in {"tmdb", "omdb"}:
+            raise ValueError("selected_movie_source must be 'tmdb' or 'omdb'")
+        return v
+
+    @field_validator("output_dir")
+    @classmethod
+    def validate_output_dir(cls, v: Optional[str]) -> Optional[str]:
+        # Usability check, NOT a security boundary: /api/rename already
+        # accepts arbitrary absolute destinations — the real boundary is the
+        # process user's filesystem permissions (PUID/PGID + mounted volumes
+        # in Docker), unchanged by this field.
+        if v is None or not v.strip():
+            return None
+        p = Path(v).expanduser().resolve()
+        if not p.exists():
+            raise ValueError(f"Destination does not exist: {v}")
+        if not p.is_dir():
+            raise ValueError(f"Destination is not a folder: {v}")
+        return str(p)
 
 
 class RenameRequest(BaseModel):
@@ -250,43 +295,68 @@ def _natural_key(p: Path):
     return [int(t) if t.isdigit() else t.lower() for t in _NAT_RE.split(str(p))]
 
 
-def _scan_dir_sync(path: str, recursive: bool) -> dict:
+def _scan_dir_sync(path: str, recursive: bool, progress: dict = None) -> dict:
+    # `progress` lets the watch-folder loop count into a PRIVATE dict so a
+    # background scan never perturbs the interactive snapshot/ticker.
+    prog = scan_progress if progress is None else progress
     base = Path(path)
     media_exts = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS | AUDIO_EXTENSIONS
 
+    # Explicit walk (not a one-shot sorted(rglob)) so scan_progress can count
+    # while the slow part runs. Filtering DURING the walk and sorting only the
+    # media files afterwards yields the identical order to the old
+    # sort-then-filter (restricting a total order commutes with filtering)
+    # while sorting a much smaller list.
     if base.is_file():
-        paths = [base]
-    elif recursive:
-        paths = sorted(base.rglob("*"), key=_natural_key)
+        prog["seen"] += 1
+        media = [base] if base.suffix.lower() in media_exts else []
+        prog["media"] += len(media)
     else:
-        paths = sorted(base.iterdir(), key=_natural_key)
+        media: list[Path] = []
+        for p in (base.rglob("*") if recursive else base.iterdir()):
+            prog["seen"] += 1
+            if p.is_file() and p.suffix.lower() in media_exts:
+                media.append(p)
+                prog["media"] += 1
+        media.sort(key=_natural_key)
 
-    files = [
-        _file_entry(p)
-        for p in paths
-        if p.is_file() and p.suffix.lower() in media_exts
-    ]
+    files = [_file_entry(p) for p in media]
     return {"count": len(files), "files": files}
 
 
 def _scan_batch_sync(path_list: list[str], recursive: bool) -> dict:
     media_exts = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS | AUDIO_EXTENSIONS
     files = []
+    # Overlapping inputs (a folder AND a file inside it, via multi-drop or the
+    # native picker) must not list the same real file twice — a duplicate row
+    # renames against itself as a bogus duplicate_destination conflict. Keyed
+    # on resolve() so symlinked routes to one file also collapse; first
+    # occurrence wins, preserving natural-sort order within each input.
+    seen: set[str] = set()
     for path_str in path_list:
         p = Path(path_str)
         if p.is_dir():
-            targets = (
-                sorted(p.rglob("*"), key=_natural_key)
-                if recursive
-                else sorted(p.iterdir(), key=_natural_key)
-            )
+            # Counting walk (see _scan_dir_sync): filter during the walk,
+            # natural-sort only the media files — identical output order.
+            targets = []
+            for t in (p.rglob("*") if recursive else p.iterdir()):
+                scan_progress["seen"] += 1
+                if t.is_file() and t.suffix.lower() in media_exts:
+                    targets.append(t)
+            targets.sort(key=_natural_key)
         else:
+            scan_progress["seen"] += 1
             targets = [p]
-        files.extend(
-            _file_entry(t)
-            for t in targets
-            if t.is_file() and t.suffix.lower() in media_exts
-        )
+        for t in targets:
+            if not (t.is_file() and t.suffix.lower() in media_exts):
+                continue
+            rp = str(t.resolve())
+            if rp in seen:
+                continue
+            seen.add(rp)
+            # Post-dedupe count = the rows the user will actually get.
+            scan_progress["media"] += 1
+            files.append(_file_entry(t))
     return {"count": len(files), "files": files}
 
 
@@ -298,7 +368,13 @@ async def scan_directory(req: ScanRequest):
     large recursive walk takes minutes, and doing it on the event loop froze
     the entire app — every request, for every user — until it finished.
     """
-    return await asyncio.to_thread(_scan_dir_sync, req.path, req.recursive)
+    # Same wrapper shape as match_files: reset-then-finally so the UI ticker
+    # can never keep showing a dead run, even when the walk raises.
+    scan_progress.update(active=True, seen=0, media=0)
+    try:
+        return await asyncio.to_thread(_scan_dir_sync, req.path, req.recursive)
+    finally:
+        scan_progress["active"] = False
 
 
 @app.post("/api/scan-batch")
@@ -309,7 +385,11 @@ async def scan_batch(req: BatchScanRequest):
     directory entries — previously it always crawled the full tree, ignoring
     the UI's "Include subfolders" toggle.
     """
-    return await asyncio.to_thread(_scan_batch_sync, req.paths, req.recursive)
+    scan_progress.update(active=True, seen=0, media=0)
+    try:
+        return await asyncio.to_thread(_scan_batch_sync, req.paths, req.recursive)
+    finally:
+        scan_progress["active"] = False
 
 
 # ─── Browse Endpoint ───────────────────────────────────────────────────
@@ -679,6 +759,40 @@ def _adjacent_date_episode(file_date, date_index: dict):
     return None
 
 
+def _short_overview(text) -> str:
+    """Episode/movie synopsis for the View-metadata dialog: HTML tags stripped
+    (TVmaze summaries are HTML; TMDb's are plain — harmless), capped at 300
+    chars so cached episode lists grow by noise, not megabytes."""
+    return re.sub(r"<[^>]+>", "", text or "").strip()[:300]
+
+
+def _range_title(best_ep: dict, e_end, se_index: dict) -> str:
+    """{t} for a multi-episode file: the joined titles of the whole span.
+
+    Single episodes (e_end falsy or not past the anchor) return exactly the
+    old expression, so their output is byte-identical. The span walks from
+    the MATCHED anchor episode (not the filename's claim), skips provider
+    gaps silently, dedupes consecutive repeats, and caps at three titles —
+    "A, B & 3 more" — so an E01-E20 pack can't explode the filename.
+    """
+    if not e_end or e_end <= best_ep.get("episode", 0):
+        return best_ep.get("title", "")
+    titles: list = []
+    for n in range(best_ep["episode"], e_end + 1):
+        t = (se_index.get((best_ep.get("season"), n)) or {}).get("title")
+        if t and (not titles or titles[-1] != t):
+            titles.append(t)
+    if not titles:
+        return best_ep.get("title", "")
+    if len(titles) == 1:
+        return titles[0]
+    if len(titles) == 2:
+        return f"{titles[0]} & {titles[1]}"
+    if len(titles) == 3:
+        return f"{titles[0]}, {titles[1]} & {titles[2]}"
+    return f"{titles[0]}, {titles[1]} & {len(titles) - 2} more"
+
+
 async def _find_series(datasource: str, group_name: str, year, source_errors: dict):
     """Search ONE TV source for a series and download its episode list.
 
@@ -730,7 +844,8 @@ async def _find_series(datasource: str, group_name: str, year, source_errors: di
                 episodes_fetch_error = _sanitize_error(exc)
                 eps = []
             episodes_data = [
-                {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
+                {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date,
+                 "overview": _short_overview(getattr(e, "overview", None) or getattr(e, "summary", None))}
                 for e in eps
             ]
     else:
@@ -769,7 +884,8 @@ async def _find_series(datasource: str, group_name: str, year, source_errors: di
                         ("tmdb", "season", show.id, sn),
                         lambda: with_retry(lambda: tmdb.get_tv_season(show.id, sn)))
                     episodes_data.extend([
-                        {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
+                        {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date,
+                 "overview": _short_overview(getattr(e, "overview", None) or getattr(e, "summary", None))}
                         for e in eps
                     ])
                 except Exception as exc:
@@ -805,8 +921,22 @@ async def get_rename_progress():
     return rename_progress
 
 
-async def _match_files_impl(req: MatchRequest):
+@app.get("/api/scan-progress")
+async def get_scan_progress():
+    """Live snapshot of the running scan (see scan_progress above)."""
+    return scan_progress
+
+
+async def _match_files_impl(req: MatchRequest, progress: dict = None):
     """Groups files by detected series/movie, looks up metadata, and proposes renames."""
+    # Private-progress support for headless (watch-folder) runs — see
+    # _scan_dir_sync. NOTE: when called directly with a private dict, the
+    # caller owns resetting active (the endpoint wrapper resets the global).
+    prog = match_progress if progress is None else progress
+
+    # Destination base (validated by MatchRequest): template paths root here
+    # when set, else next to each source file — exactly the old behavior.
+    out_base = Path(req.output_dir) if req.output_dir else None
 
     results = []
     # First sanitized error per datasource — surfaced to the UI so "no match"
@@ -838,27 +968,32 @@ async def _match_files_impl(req: MatchRequest):
     # /api/match-progress and renders "Matching group X/Y: NAME (N files)…".
     # Each music file counts as its own group (MusicBrainz is 1 req/s, so
     # per-file progress is exactly what makes long audio batches bearable).
-    match_progress.update(
+    prog.update(
         active=True, total=len(groups) + len(music_files), current=0,
         group="", files=0, started=time.time(),
     )
 
     # ── Music: per-file MusicBrainz recording search ───────────────────────
-    if music_files and req.datasource != "musicbrainz":
+    # Audio ALWAYS routes here, whatever Source is selected — the branch is
+    # source-independent and MusicBrainz is keyless, so a mixed video+music
+    # batch matches completely in one click. (The reverse has no auto-route:
+    # Source=MusicBrainz with video files still refuses below, because which
+    # TV/movie source to use is a real user choice.)
+    if music_files:
+        # A mixed batch carries ONE req.template — usually a video template,
+        # which would render garbage names for audio. Use it for music only
+        # when it actually speaks music ({artist}/{album}/{track}), else the
+        # music default. Same rule the UI's Music preset follows.
+        template_music = (
+            req.template
+            if (req.template and any(tok in req.template
+                                     for tok in ("{artist}", "{album}", "{track}")))
+            else TEMPLATES["music"]
+        )
         for f in music_files:
-            match_progress["current"] += 1
-            results.append({
-                "original": f["path"], "filename": f["filename"],
-                "new_path": None, "new_name": None, "preview": None,
-                "score": 0, "matched": False, "metadata": None,
-                "reason": "Switch Source to MusicBrainz for audio files",
-            })
-    elif music_files:
-        template_music = req.template or TEMPLATES["music"]
-        for f in music_files:
-            match_progress["current"] += 1
-            match_progress["group"] = f.get("clean_name") or f["filename"]
-            match_progress["files"] = 1
+            prog["current"] += 1
+            prog["group"] = f.get("clean_name") or f["filename"]
+            prog["files"] = 1
 
             try:
                 # Cached (15 min) — amortizes MusicBrainz's mandatory 1 req/s
@@ -897,13 +1032,16 @@ async def _match_files_impl(req: MatchRequest):
                     "y": best.year or "",
                 }
                 original = Path(f["path"])
-                new_path = build_new_path(original, template_music, bindings, original.parent)
+                new_path = build_new_path(original, template_music, bindings, out_base or original.parent)
                 results.append({
                     "original": f["path"],
                     "filename": f["filename"],
                     "new_path": str(new_path),
                     "new_name": new_path.name,
-                    "preview": str(new_path.relative_to(original.parent)),
+                    # relative_to raises once a destination roots the path
+                    # outside the source tree — show the full path then.
+                    "preview": (str(new_path.relative_to(original.parent))
+                                if out_base is None else str(new_path)),
                     "score": round(best_score, 3),
                     # Same shape as cascade_breakdown()'s components, so the
                     # existing Why-this-match table renders it unchanged.
@@ -919,6 +1057,9 @@ async def _match_files_impl(req: MatchRequest):
                         "album": best.album,
                         "title": best.title,
                         "year": best.year,
+                        # Audio auto-routes here regardless of the selected
+                        # Source — say so in the View-metadata dialog.
+                        "datasource": "musicbrainz",
                     },
                 })
             else:
@@ -934,9 +1075,9 @@ async def _match_files_impl(req: MatchRequest):
                 })
 
     for group_name, group_files in groups.items():
-        match_progress["current"] += 1
-        match_progress["group"] = group_name
-        match_progress["files"] = len(group_files)
+        prog["current"] += 1
+        prog["group"] = group_name
+        prog["files"] = len(group_files)
 
         # Cross-talk guard: the MusicBrainz source only matches audio.
         if req.datasource == "musicbrainz":
@@ -983,7 +1124,8 @@ async def _match_files_impl(req: MatchRequest):
                         episodes_fetch_error = _sanitize_error(exc)
                         eps = []
                     episodes_data = [
-                        {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
+                        {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date,
+                 "overview": _short_overview(getattr(e, "overview", None) or getattr(e, "summary", None))}
                         for e in eps
                     ]
                 else:
@@ -999,7 +1141,8 @@ async def _match_files_impl(req: MatchRequest):
                                 ("tmdb", "season", req.selected_show_id, sn),
                                 lambda: with_retry(lambda: tmdb.get_tv_season(req.selected_show_id, sn)))
                             episodes_data.extend([
-                                {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date}
+                                {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date,
+                 "overview": _short_overview(getattr(e, "overview", None) or getattr(e, "summary", None))}
                                 for e in eps
                             ])
                         except Exception as exc:
@@ -1127,7 +1270,7 @@ async def _match_files_impl(req: MatchRequest):
                         "s": best_ep["season"],
                         "e": best_ep["episode"],
                         "e_end": f.get("episode_end"),
-                        "t": best_ep.get("title", ""),
+                        "t": _range_title(best_ep, f.get("episode_end"), se_index),
                         "d": best_ep.get("air_date", ""),
                         "source": f.get("source", ""),
                         "vf": f.get("video_format", ""),
@@ -1143,7 +1286,7 @@ async def _match_files_impl(req: MatchRequest):
                         "imdbid": "",
                     }
                     original = Path(f["path"])
-                    new_path = build_new_path(original, template, bindings, original.parent.parent)
+                    new_path = build_new_path(original, template, bindings, out_base or original.parent.parent)
                     results.append({
                         "original": f["path"],
                         "filename": f["filename"],
@@ -1158,6 +1301,7 @@ async def _match_files_impl(req: MatchRequest):
                             "season": best_ep["season"],
                             "episode": best_ep["episode"],
                             "title": best_ep.get("title"),
+                            "overview": best_ep.get("overview") or "",
                             "poster": show_data.get("poster"),
                             # Which provider actually supplied this show —
                             # differs from req.datasource after a fallback.
@@ -1218,7 +1362,49 @@ async def _match_files_impl(req: MatchRequest):
             # source uses the trimmed-query fallback so a noisy name still hits.
             movie_candidates: list = []  # list of dicts with unified shape
 
-            if tmdb.enabled:
+            # ── Exact-id mode (movie twin of selected_show_id) ─────────────
+            # The disambiguation dialog and the manual Search-metadata pick
+            # re-request with the chosen id: fetch that one record and let the
+            # normal scoring/binding pipeline run over it, so {tmdbid}/
+            # {imdbid}/{y}/score_detail all come out real.
+            exact_pick = bool(req.selected_movie_id and req.selected_movie_source)
+            if exact_pick:
+                try:
+                    if req.selected_movie_source == "tmdb":
+                        if not tmdb.enabled:
+                            raise RuntimeError("TMDb key not configured")
+                        mid = int(req.selected_movie_id)
+                        details = await cached(
+                            ("tmdb", "movie", mid),
+                            lambda: with_retry(lambda: tmdb.get_movie_details(mid)))
+                        rd = details.get("release_date") or ""
+                        movie_candidates = [{
+                            "title": details.get("title", ""),
+                            "original_title": details.get("original_title", ""),
+                            "year": int(rd[:4]) if len(rd) >= 4 and rd[:4].isdigit() else None,
+                            "poster": (f"https://image.tmdb.org/t/p/w154{details.get('poster_path')}"
+                                       if details.get("poster_path") else None),
+                            "overview": _short_overview(details.get("overview")),
+                            "id": details["id"],
+                            "source": "tmdb",
+                        }]
+                    else:
+                        r = await omdb.get_by_imdb_id(req.selected_movie_id)
+                        movie_candidates = [] if r is None else [{
+                            "title": r.title,
+                            "original_title": r.title,
+                            "year": r.year,
+                            "poster": r.poster_url,
+                            "overview": _short_overview(r.overview),
+                            "id": r.imdb_id,
+                            "source": "omdb",
+                        }]
+                except Exception as exc:
+                    source_errors.setdefault(
+                        req.selected_movie_source, _sanitize_error(exc))
+                    movie_candidates = []
+
+            if not exact_pick and tmdb.enabled:
                 tmdb_results, errs = await _cascade_search(
                     lambda q, y: cached(("tmdb", "search_movie", q, y, req.include_adult),
                                         lambda: tmdb.search_movie(q, y, include_adult=req.include_adult)),
@@ -1232,11 +1418,12 @@ async def _match_files_impl(req: MatchRequest):
                         "original_title": r.original_title,
                         "year": r.year,
                         "poster": r.poster_url_small,
+                        "overview": _short_overview(r.overview),
                         "id": r.id,
                         "source": "tmdb",
                     })
 
-            if omdb.enabled:
+            if not exact_pick and omdb.enabled:
                 omdb_results, errs = await _cascade_search(
                     lambda q, y: cached(("omdb", "search_movie", q, y),
                                         lambda: omdb.search_movie(q, y)), group_name, year,
@@ -1249,6 +1436,9 @@ async def _match_files_impl(req: MatchRequest):
                         "original_title": r.title,   # OMDb doesn't split original_title
                         "year": r.year,
                         "poster": r.poster_url,
+                        # OMDb SEARCH results carry no plot (only the tt-ID
+                        # lookup does) — empty, no extra API calls.
+                        "overview": _short_overview(r.overview),
                         "id": r.imdb_id,
                         "source": "omdb",
                     })
@@ -1264,6 +1454,41 @@ async def _match_files_impl(req: MatchRequest):
                 seen_keys.add(key)
                 deduped.append(c)
             movie_candidates = deduped
+
+            # ── Remake disambiguation ──────────────────────────────────────
+            # A file with NO year whose candidates contain ≥2 same-titled
+            # entries with different years ("The Thing" 1982/2011) would
+            # auto-pick a guess. Prompt instead — same needs_selection shape
+            # the series path uses, tagged media:"movie" so the dialog's
+            # Select re-requests with selected_movie_id. Files that carry a
+            # year never prompt: the year metric already disambiguates them.
+            # Plausibility floor: the shared title must actually resemble the
+            # filename (>= review threshold) — the trimmed-query cascade can
+            # surface remake pairs of some barely-related title for junk
+            # names, and prompting for those would be noise (they'd score
+            # under the gate anyway).
+            if not exact_pick and group_files and group_files[0].get("year") is None:
+                by_title: dict[str, list] = {}
+                for c in movie_candidates:
+                    by_title.setdefault(normalize(c.get("title") or ""), []).append(c)
+                for same in by_title.values():
+                    if (len(same) >= 2
+                            and len({c.get("year") for c in same}) >= 2
+                            and name_similarity(group_name, same[0].get("title") or "")
+                                >= REVIEW_CONFIDENCE_THRESHOLD):
+                        return {
+                            "needs_selection": True,
+                            "media": "movie",
+                            "group_name": group_name,
+                            "candidates": [
+                                {"id": c["id"], "name": c["title"], "year": c.get("year"),
+                                 "poster": c.get("poster"),
+                                 "overview": c.get("overview") or "",
+                                 "status": "", "genres": [],
+                                 "datasource": c["source"]}
+                                for c in same[:10]
+                            ],
+                        }
 
             template = req.template or TEMPLATES["movie"]
             for f in group_files:
@@ -1323,7 +1548,7 @@ async def _match_files_impl(req: MatchRequest):
                         "imdbid": best_movie["id"] if best_movie["source"] == "omdb" else "",
                     }
                     original = Path(f["path"])
-                    new_path = build_new_path(original, template, bindings, original.parent)
+                    new_path = build_new_path(original, template, bindings, out_base or original.parent)
                     results.append({
                         "original": f["path"],
                         "filename": f["filename"],
@@ -1336,6 +1561,7 @@ async def _match_files_impl(req: MatchRequest):
                         "metadata": {
                             "title": best_movie["title"],
                             "year": best_movie.get("year"),
+                            "overview": best_movie.get("overview") or "",
                             "poster": best_movie.get("poster"),
                         },
                     })
@@ -1383,10 +1609,23 @@ async def _match_files_impl(req: MatchRequest):
     # A subtitle companion is identified by sharing the same stem (ignoring any
     # trailing language tag such as ".en" or ".forced.en").
     video_stem_map: dict[str, dict] = {}
+    # Detection fallback for stem misses: subtitles downloaded from a
+    # different release never share the video's stem, but the scanner ran
+    # full detection on them too — pair on (normalized clean_name, season,
+    # episode). Values are LISTS so quality doubles claiming the same SxE
+    # can be detected and refused instead of guessed.
+    video_se_map: dict[tuple, list] = {}
+    vf_by_path = {f["path"]: f for f in video_files}
     for r in results:
         if r.get("matched") and r.get("new_path"):
             orig_stem = Path(r["original"]).stem.lower()
             video_stem_map[orig_stem] = r
+            f = vf_by_path.get(r["original"])
+            # Music results also land here matched — their season is None,
+            # so the SxE index stays videos-only by construction.
+            if f and f.get("season") is not None and f.get("episode") is not None:
+                key = (normalize(f.get("clean_name") or ""), f["season"], f["episode"])
+                video_se_map.setdefault(key, []).append(r)
 
     for sf in subtitle_files:
         sub_path = Path(sf["path"])
@@ -1400,7 +1639,18 @@ async def _match_files_impl(req: MatchRequest):
         else:
             clean_stem = sub_stem_full
 
+        # Exact stem match first — it is certain. Detection fallback only
+        # fills stem MISSES, so pre-F27 pairings are byte-identical.
         companion = video_stem_map.get(clean_stem.lower())
+        ambiguous_se = None
+        if companion is None and sf.get("season") is not None and sf.get("episode") is not None:
+            candidates = video_se_map.get(
+                (normalize(sf.get("clean_name") or ""), sf["season"], sf["episode"]), []
+            )
+            if len(candidates) == 1:
+                companion = candidates[0]
+            elif len(candidates) > 1:
+                ambiguous_se = (sf["season"], sf["episode"])
 
         if companion:
             # Derive new subtitle path from the companion video's new_path
@@ -1419,7 +1669,17 @@ async def _match_files_impl(req: MatchRequest):
                 "is_subtitle": True,
             })
         else:
-            # No companion video matched — skip (do not rename)
+            # No companion video matched — skip (do not rename). Ambiguity
+            # gets its own truthful reason: renaming against the wrong
+            # quality double would be a guess.
+            if ambiguous_se:
+                s, e = ambiguous_se
+                reason = (
+                    f"Subtitle skipped — multiple videos match "
+                    f"S{s:02d}E{e:02d}; rename manually"
+                )
+            else:
+                reason = "Subtitle skipped — companion video not in this batch"
             results.append({
                 "original": sf["path"],
                 "filename": sf["filename"],
@@ -1429,7 +1689,7 @@ async def _match_files_impl(req: MatchRequest):
                 "score": 0,
                 "matched": False,
                 "is_subtitle": True,
-                "reason": "Subtitle skipped — companion video not in this batch",
+                "reason": reason,
             })
 
     # Detect conflicts
@@ -1467,22 +1727,30 @@ async def _match_files_impl(req: MatchRequest):
 
 # ─── Rename Endpoint ───────────────────────────────────────────────────
 
-def _rename_sync(operations: list, action: RenameAction, batch_id: str) -> tuple:
+def _rename_sync(operations: list, action: RenameAction, batch_id: str,
+                 progress: dict = None, protect_dir: Optional[Path] = None) -> tuple:
     """Blocking rename loop — runs in a worker thread via asyncio.to_thread so
     a multi-GB copy or cross-device move never freezes the event loop (the
     same bug class as the v1.3.0 scan freeze; it also starved the Docker
     HEALTHCHECK into marking the container unhealthy). Updates the
     rename_progress snapshot before each operation so the UI can render
     'Renaming 3/12: file…' while the copy runs."""
+    prog = rename_progress if progress is None else progress
     results = []
     history_entries = []
+    # Source parents a MOVE emptied, pruned AFTER the whole batch — a folder
+    # is only empty once its last selected file has left, so per-op ordering
+    # can't strand it. MOVE only: KEEPLINK leaves a symlink at the original
+    # path (folder not empty by design); RENAME/COPY/links never empty one.
+    # Dedupe keyed by parent path; one dest kept for ancestor computation.
+    prune_candidates: dict = {}
 
     for op in operations:
         source = Path(op["original"])
         dest = Path(op["new_path"])
 
-        rename_progress["current"] += 1
-        rename_progress["file"] = source.name
+        prog["current"] += 1
+        prog["file"] = source.name
 
         if not source.exists():
             results.append({
@@ -1501,6 +1769,10 @@ def _rename_sync(operations: list, action: RenameAction, batch_id: str) -> tuple
             "error": result.error,
         })
 
+        if (action == RenameAction.MOVE and result.success
+                and source.parent != dest.parent):   # same-folder moves: nothing to clean
+            prune_candidates.setdefault(str(source.parent), dest)
+
         # Record in history
         history_entries.append(HistoryEntry(
             id=str(uuid.uuid4()),
@@ -1512,6 +1784,27 @@ def _rename_sync(operations: list, action: RenameAction, batch_id: str) -> tuple
             error=result.error,
             batch_id=batch_id,
         ))
+
+    # Same safety envelope as the undo-side pruning (F10): rmdir()-only walk
+    # (can never delete data), at most 3 levels upward, never at/above the
+    # common ancestor of source and destination. Best-effort by design.
+    # `protect_dir` (watch-folder runs): a directory the walk must never
+    # remove — a watch whose move batch empties its own root would otherwise
+    # delete the folder it watches and kill the rule.
+    for parent_str, dest_path in prune_candidates.items():
+        parent = Path(parent_str)
+        stop = _common_ancestor(parent, dest_path)
+        if protect_dir is not None:
+            # Effective stop = whichever of {common ancestor, protected dir}
+            # the upward walk reaches FIRST — protecting a dir below the
+            # ancestor must not license pruning above the ancestor.
+            for p in (parent, *parent.parents):
+                if p == stop:
+                    break
+                if p == protect_dir:
+                    stop = protect_dir
+                    break
+        _prune_empty_dirs(parent, stop)
 
     return results, history_entries
 
@@ -1546,6 +1839,191 @@ async def rename_files(req: RenameRequest):
         "failed": sum(1 for r in results if not r["success"]),
         "results": results,
     }
+
+
+# ─── Watch folders (auto-organize) ─────────────────────────────────────
+# A background loop polls each enabled watch rule and runs the SAME
+# scan → match → rename internals the interactive flow uses — with private
+# progress dicts so the interactive snapshots/tickers are never perturbed.
+# Only matches at/above REVIEW_CONFIDENCE_THRESHOLD act; ambiguous groups
+# (needs_selection) and everything below the gate are left in place. Every
+# run is a normal history batch — undoable from the History modal.
+
+_watch_log: list = []          # ring of {"ts", "folder", "message"}, cap 50
+_watch_status: dict = {}       # folder -> {"last_run": iso, "last_result": str}
+# Per-folder session state: {"sizes": {path: size}} for the settle check and
+# {"done": set(paths)} so unmatched/skipped files don't re-spam providers
+# every cycle. Cleared when the rules are saved (lets users retry after a fix)
+# and on restart.
+_watch_state: dict = {}
+_watch_task = None
+
+
+def _watch_log_add(folder: str, message: str) -> None:
+    _watch_log.append({
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "folder": folder,
+        "message": message,
+    })
+    del _watch_log[:-50]
+    _watch_status[folder] = {
+        "last_run": datetime.now().isoformat(timespec="seconds"),
+        "last_result": message,
+    }
+
+
+def _watch_interval() -> float:
+    """CINESORT_WATCH_INTERVAL seconds (default 60, min 2, garbage → default)
+    — the CINESORT_CACHE_TTL deployment-layer pattern."""
+    try:
+        v = float(os.environ.get("CINESORT_WATCH_INTERVAL", 60.0))
+    except (TypeError, ValueError):
+        return 60.0
+    return max(2.0, v)
+
+
+async def _watch_one(w: dict) -> None:
+    folder = w["folder"]
+    if not Path(folder).is_dir():
+        # Unmounted NAS etc. — the rule survives (load is shape-only), the
+        # cycle just says why nothing happened.
+        _watch_log_add(folder, "watch folder is missing — skipped")
+        return
+    st = _watch_state.setdefault(folder, {"sizes": {}, "done": set()})
+
+    scan = await asyncio.to_thread(
+        _scan_dir_sync, folder, True, {"seen": 0, "media": 0})
+    prev, cur = st["sizes"], {}
+    ready = []
+    for f in scan["files"]:
+        rp = str(Path(f["path"]).resolve())
+        cur[rp] = f["size"]
+        if rp in st["done"]:
+            continue
+        # Settle check: act only on files whose size is stable across two
+        # consecutive polls — a half-copied torrent never moves.
+        if prev.get(rp) == f["size"]:
+            ready.append(f)
+    st["sizes"] = cur
+    st["done"] = {p for p in st["done"] if p in cur}   # forget vanished files
+    if not ready:
+        return
+
+    try:
+        req = MatchRequest(
+            files=ready, datasource=w["datasource"], template=w["template"],
+            output_dir=w.get("output_dir") or None,
+        )
+    except Exception as exc:   # e.g. destination vanished since save
+        _watch_log_add(folder, f"rule invalid right now: {_sanitize_error(exc)}")
+        return
+    data = await _match_files_impl(req, progress={})
+
+    if isinstance(data, dict) and data.get("needs_selection"):
+        # needs_selection aborts the whole match call — mark THIS group's
+        # files as skipped so one ambiguous show can't starve the rest of
+        # the folder forever, and tell the user the honest fix.
+        gname = data.get("group_name") or "?"
+        n = 0
+        for f in ready:
+            if f.get("clean_name") == gname:
+                st["done"].add(str(Path(f["path"]).resolve()))
+                n += 1
+        _watch_log_add(folder, (
+            f"skipped '{gname}' ({n} file(s)) — ambiguous "
+            f"({len(data.get('candidates') or [])} candidates); match it once "
+            f"manually, then rename stays automatic"))
+        return
+
+    ops, held = [], 0
+    for r in data.get("results", []):
+        rp = str(Path(r["original"]).resolve())
+        if (r.get("matched") and r.get("new_path")
+                and r.get("score", 0) >= REVIEW_CONFIDENCE_THRESHOLD):
+            ops.append({"original": r["original"], "new_path": r["new_path"]})
+        else:
+            st["done"].add(rp)   # don't re-spam providers for it every cycle
+            held += 1
+    if not ops:
+        _watch_log_add(folder, f"nothing safe to organize ({held} file(s) left in place)")
+        return
+
+    batch_id = str(uuid.uuid4())
+    results, history_entries = await asyncio.to_thread(
+        _rename_sync, ops, RenameAction(w["action"]), batch_id,
+        {"current": 0, "total": len(ops), "file": ""},
+        Path(folder))   # protect the watched root from the empty-dir prune
+    if history_entries:
+        history.add_batch(history_entries)
+    for r in results:
+        st["done"].add(str(Path(r["original"]).resolve()))
+    succ = sum(1 for r in results if r["success"])
+    msg = f"organized {succ} of {len(ops)} file(s) ({w['action']})"
+    if held:
+        msg += f", {held} left in place"
+    if succ < len(ops):
+        first_err = next((r["error"] for r in results if not r["success"]), "")
+        msg += f" — first failure: {first_err}"
+    _watch_log_add(folder, msg)
+
+
+async def _watch_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(_watch_interval())
+            # Never contend with an interactive run for providers/filesystem.
+            if (match_progress["active"] or rename_progress["active"]
+                    or scan_progress["active"]):
+                continue
+            for w in load_watches():     # re-read each cycle: edits apply live
+                if not w.get("enabled"):
+                    continue
+                try:
+                    await _watch_one(w)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:   # one broken watch never kills the loop
+                    _watch_log_add(w.get("folder", "?"),
+                                   f"watch error: {_sanitize_error(exc)}")
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            # Defensive: the loop itself must survive anything.
+            await asyncio.sleep(5)
+
+
+class WatchListRequest(BaseModel):
+    watches: list = []
+
+
+@app.get("/api/watches")
+async def get_watches():
+    """Configured watch rules + per-watch last outcome + the poll interval."""
+    return {
+        "watches": load_watches(),
+        "status": _watch_status,
+        "interval": _watch_interval(),
+    }
+
+
+@app.post("/api/watches")
+async def post_watches(req: WatchListRequest):
+    """Replace the full rule list (the Settings card edits client-side and
+    saves whole — the keys.env save pattern)."""
+    try:
+        saved = save_watches(req.watches)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # Fresh session state so edited rules re-evaluate everything, including
+    # files previously skipped as unmatched/ambiguous.
+    _watch_state.clear()
+    return {"watches": saved}
+
+
+@app.get("/api/watch-log")
+async def get_watch_log():
+    """Last 50 auto-organize outcomes (in-memory ring, newest last)."""
+    return {"log": _watch_log[-50:]}
 
 
 # ─── Utility Endpoints ─────────────────────────────────────────────────
@@ -1859,8 +2337,16 @@ async def post_settings(req: SettingsRequest):
     }
 
 
+@app.on_event("startup")
+async def _start_watcher():
+    global _watch_task
+    _watch_task = asyncio.create_task(_watch_loop())
+
+
 @app.on_event("shutdown")
 async def shutdown():
+    if _watch_task:
+        _watch_task.cancel()
     await tmdb.close()
     await tvmaze.close()
     await omdb.close()

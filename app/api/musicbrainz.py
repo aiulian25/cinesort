@@ -17,7 +17,7 @@ from typing import Optional
 
 
 API_BASE = "https://musicbrainz.org/ws/2"
-USER_AGENT = "CineSort/1.3.8 (https://github.com/aiulian25/cinesort)"
+USER_AGENT = "CineSort/1.4.0 (https://github.com/aiulian25/cinesort)"
 MIN_REQUEST_INTERVAL = 1.0   # seconds — MusicBrainz hard rate limit
 
 

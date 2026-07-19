@@ -47,5 +47,14 @@ echo "Web UI: http://localhost:${CINESORT_PORT:-8888}"
 echo "=========================================="
 echo ""
 
-# Execute command as cinesort user
+# Execute command as cinesort user.
+# When the command is EXACTLY the image's stock CMD (see Dockerfile CMD — keep
+# the string below in sync with it), honor CINESORT_HOST/CINESORT_PORT so the
+# documented env vars actually control the bind address. Any other command —
+# a compose `command:` override, a debug shell, or even the same uvicorn line
+# with the user's own --port — passes through verbatim and is never rewritten.
+if [ "$*" = "python -m uvicorn app.main:app --host 0.0.0.0 --port 8888" ]; then
+    exec gosu cinesort python -m uvicorn app.main:app \
+        --host "${CINESORT_HOST:-0.0.0.0}" --port "${CINESORT_PORT:-8888}"
+fi
 exec gosu cinesort "$@"

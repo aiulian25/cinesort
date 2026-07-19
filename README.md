@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.3.8-green.svg)
+![Version](https://img.shields.io/badge/version-1.4.0-green.svg)
 
 ---
 
@@ -55,7 +55,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 - **Modern flat UI, two themes** — **Dark** (default) and **Light**; switch in Settings → Appearance, remembered per device
 - **Folder picker** — Native OS file/folder picker on desktop (reaches your whole filesystem); a rich in-app browser on Docker/web with a shortcuts sidebar, editable path + breadcrumb, type-ahead filter, "media only" toggle, cross-folder multi-select, and full keyboard navigation
 - **Template builder** — Insert `{tokens}` from a palette and see a live preview of the resulting path
-- **Bulk selection** — One-click "Matched", "≥60%", and "Clear unmatched"
+- **Bulk selection** — One-click "Matched", "High only" (at/above the review threshold), and "Clear unmatched"
 - **Inline conflict resolution** — Resolve duplicate/exists conflicts in place with **Skip** or **Rename → (2)**
 - **Drag & Drop** — Drop files or folders anywhere onto the app window (deb/AppImage, Wayland-aware)
 - **Start over** — Click the CineSort logo to clear the session and begin fresh
@@ -102,20 +102,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.3.8_amd64.deb # arm64: cinesort_1.3.8_arm64.deb
+sudo dpkg -i cinesort_1.4.0_amd64.deb # arm64: cinesort_1.4.0_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.3.8.x86_64.rpm # arm64: cinesort-1.3.8.aarch64.rpm
+sudo dnf install ./cinesort-1.4.0.x86_64.rpm # arm64: cinesort-1.4.0.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.3.8.AppImage # arm64: CineSort-1.3.8-arm64.AppImage
-./CineSort-1.3.8.AppImage
+chmod +x CineSort-1.4.0.AppImage # arm64: CineSort-1.4.0-arm64.AppImage
+./CineSort-1.4.0.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -217,6 +217,7 @@ Restart the app for changes to take effect when editing the file manually.
 | `CINESORT_LOW_CONFIDENCE` | `0.4` | Matches at/below this score are never auto-selected for renaming (0–1) |
 | `CINESORT_REVIEW_CONFIDENCE` | `0.6` | Matches below this score show the "needs review" marker and count toward "Review N matches" (0–1) |
 | `CINESORT_CACHE_TTL` | `900` | Seconds that provider responses (searches, episode lists) are cached in memory — re-matching the same show costs zero requests within this window. `0` disables caching |
+| `CINESORT_WATCH_INTERVAL` | `60` | Seconds between watch-folder checks (Settings → Watch folders). Minimum 2 |
 | `CINESORT_HOST` | `0.0.0.0` | Server bind address |
 | `CINESORT_PORT` | `8888` | Server port |
 | `CINESORT_DATA_DIR` | `/data` (Docker image) | Where history (`history.json`) and UI-saved API keys (`config/keys.env`) live. The image points it at the `/data` volume so both survive container recreation. Unset on desktop builds (per-user home paths are used). |
@@ -272,6 +273,7 @@ volumes:
   - **TMDb** — best for mainstream movies and TV (default)
   - **TVMaze** — alternative TV source, completely free
   - **OMDb (IMDb)** — IMDb data; ideal for niche or adult titles
+- Audio files (`.mp3`, `.flac`, …) always match via **MusicBrainz** regardless of the selected Source — a mixed video + music batch matches in one click (music uses its own `{artist}/{album}/{track} - {title}` naming unless your template contains music tokens)
 - Enable **Adult** if you need titles that TMDb filters by default
 - Click **Match**
 - If multiple shows are found you will be asked to choose one
@@ -307,19 +309,35 @@ Or build your own: type tokens directly, or click them from the **token palette*
 | **Hard Link** | Same-filesystem hard link at the new path |
 | **Symlink** | Symbolic link — not supported on SMB/FAT |
 
+### Destination folder (optional)
+
+Set **Destination** in the options card to build template paths under a target folder instead of next to each source file — the "sort my Downloads into my library" workflow: Destination `/mnt/media/TV`, template `{name}/Season {s}/…`, action **Move**. Leave it empty to organize in place (the default). Previews and conflict checks run against the real target, and Undo always returns files to their true origins.
+
+- Not used by **Rename (in-place)** — that action never moves files, so the field is disabled while it's selected
+- **Docker:** the destination must be inside a mounted volume, same rule as scanning (see Volume Mounts above)
+
 ### 6. Review and rename
 
 - Check the confidence tier on each match — **High** (green), **Review** (amber, <60%), **Low** (red, <40%, auto-deselected)
-- Use the bulk buttons above the list to quickly select **Matched**, **≥60%**, or **Clear unmatched**
+- Use the bulk buttons in the New names header to quickly select **Matched**, **High only** (at/above the review threshold), or **Clear unmatched**
 - Uncheck any rows you want to skip
 - Click **Rename**
 - If any **conflicts** are found (duplicate destination / file already exists), resolve them inline with **Skip** or **Rename → (2)**
 - Results are shown immediately; failures include the reason
 - All operations are recorded in **History** (top-right button) with per-operation **Undo**
 
+### Watch folders (auto-organize)
+
+Settings → **Watch folders** turns CineSort into a hands-off pipeline: define up to 10 rules — folder, metadata source, naming template, action (Move/Copy/Hard Link/Symlink/Move + Keep Link), optional destination — and every enabled folder is checked once a minute (`CINESORT_WATCH_INTERVAL` to tune). New media files are picked up only after their size has settled across two checks (a half-copied download never moves), matched headlessly, and renamed **only at high confidence** (at/above the review threshold). Every run is a normal history batch — undo it from History like any manual rename. The card shows each rule's recent activity.
+
+What is deliberately left in place, with the reason in the activity log:
+- **Ambiguous titles** (several same-named shows) — match the show once manually; automation resumes after
+- **Low-confidence and unmatched files** — nothing renames below the review threshold, ever
+- **Docker:** watched folders and destinations must be mounted volumes; rules live on `/data` and survive container updates. **Desktop:** watches run while CineSort is open.
+
 ### Change the theme
 
-Open ** Settings → Appearance** and pick **Dark**, **Light**, or **Aurora**. The choice applies instantly and is remembered on this device.
+Open ** Settings → Appearance** and pick **Dark** or **Light**. The choice applies instantly and is remembered on this device.
 
 ---
 
@@ -518,6 +536,27 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.4.0
+- **Watch folders (auto-organize)** — Settings → Watch folders turns CineSort into a hands-off pipeline: up to 10 rules (folder, source, template, action, destination), checked once a minute (`CINESORT_WATCH_INTERVAL`). Files are picked up only after their size settles (half-copied downloads never move), matched headlessly, and renamed **only at high confidence** — every run is a normal, undoable history batch. Ambiguous titles and low-confidence files stay in place, with the reason in the card's activity log. Rules live on `/data` in Docker and survive container updates.
+- **Destination folder** — an optional Destination in the options card roots template paths under a target library instead of next to each file ("sort Downloads into `/mnt/media/TV`"). Previews and conflict checks run against the real target; Undo returns files to their true origins. Disabled under Rename (in-place), which never moves files.
+- **Movies: remake disambiguation + id-accurate manual matching** — a no-year file whose candidates include same-titled remakes ("The Thing" 1982/2011) now prompts like series do, and manual picks (dialog or Search metadata) re-match through the backend by exact id — `{tmdbid}`/`{imdbid}`, year, poster and the real score breakdown all come out right. An explicit pick stays selected.
+- **Mixed batches match in one click** — audio files always route to MusicBrainz whatever Source is selected; video follows the dropdown. Music keeps its own naming unless your template carries music tokens.
+- **Smarter subtitles** — a subtitle from a different release (`show.s01e05.WEBRip.en.srt` beside your BluRay file) now pairs by detected season/episode when stems differ; quality-double ambiguity is refused honestly. Language tags are preserved as before.
+- **TVmaze specials** — `SP01`-style files now match TVmaze specials (season 0, air order), same convention as TMDb.
+- **Multi-episode titles** — `Show.S01E01-E02.mkv` renders both titles (`… - Rose & The End of the World`), capped at three (`A, B & N more`).
+- **Move cleans up after itself** — a Move batch removes the source folders it emptied (`rmdir`-only, never touches folders still holding anything); undo recreates them. Watched folders are never removed.
+- **Scan progress** — big NAS scans show live counts (`Scanning… 1,240 items · 312 media files`) instead of an indefinite bar.
+- **Richer View metadata** — poster thumbnail and episode synopsis / movie plot, fetched from data the providers already sent.
+- **Undo all from Rename Results** — revert the whole batch right where you see it, no trip to History.
+- **Actionable History rows** — Show in folder (desktop) / Copy path per entry, Copy error on failures; full paths on hover.
+- **Keep largest** — one-click duplicate triage in the conflicts dialog keeps the biggest copy selected and skips the rest.
+- **Type-to-filter the panes** — find one file in an 800-row batch; visibility only, selection untouched.
+- **Custom template presets** — save the current template under a name; presets persist like every other preference, right-click to remove.
+- **Bulk-selection buttons restored** — Matched / High only / Clear unmatched are back in the New names header (the README promised them; now they exist).
+- **Overlap-proof scanning** — dropping a folder plus files inside it lists each real file once (symlink twins collapse too); dropped folders honor the subfolder toggle.
+- **Docker honors `CINESORT_PORT`/`CINESORT_HOST`** — the documented env vars now actually bind the server and the healthcheck follows.
+- **Fixes** — the right-click menu works for filenames with apostrophes (`Ocean's Eleven.mkv`); stale README claims (Aurora theme, ≥60% wording) corrected.
 
 ### v1.3.8
 - **Redesigned update experience** — a quiet dismissible banner announces new releases in the main window (once per version); Settings gains a proper **Software update** card with a real progress bar and byte counts, verification status, and honest error states; and the restart prompt is now an in-app CineSort-themed dialog whose button says **Restart CineSort** — no more OS-looking popup that read like a system reboot. Same two-click flow and identical security model (GitHub-only, sha256-verified, polkit-authorized) underneath.

@@ -100,8 +100,16 @@
                 </div>
                 <div class="field field-template">
                     <label class="field-label" for="template">Naming template</label>
-                    <input type="text" id="template" class="glass-input mono"
-                           value="{name} ({year})/{name} ({year})" spellcheck="false">
+                    <div style="display:flex;gap:6px">
+                        <input type="text" id="template" class="glass-input mono" style="flex:1;min-width:0"
+                               value="{name} ({year})/{name} ({year})" spellcheck="false">
+                        <button id="template-save" class="glass-btn" title="Save current template as a preset" style="padding:4px 10px;flex-shrink:0">Save</button>
+                    </div>
+                </div>
+                <div class="field field-dest">
+                    <label class="field-label" for="dest-path">Destination (optional)</label>
+                    <input type="text" id="dest-path" class="glass-input mono"
+                           placeholder="Leave empty to organize in place" spellcheck="false">
                 </div>
             </div>
             <div class="template-row">
@@ -128,6 +136,7 @@
                     <button class="preset-btn" data-template="{name}/{name} - {absolute} - {title}" title="Anime (organise into folder)">Anime</button>
                     <button class="preset-btn" data-template="{name} - {s00e00} - {title}" title="Rename in-place (no folder creation)">Flat</button>
                     <button class="preset-btn" data-template="{artist}/{album}/{track} - {title}" title="Music (organise into artist/album folders)">Music</button>
+                    <span id="custom-presets"></span>
                 </div>
             </div>
             <div class="template-preview" id="template-preview" title="Live preview against the first file"></div>
@@ -177,6 +186,9 @@
                         <button class="seg-btn" data-filter="matched">Matched</button>
                         <button class="seg-btn" data-filter="unmatched">Unmatched</button>
                     </div>
+                    <input type="text" id="pane-filter" class="glass-input" placeholder="Filter…"
+                           spellcheck="false" aria-label="Filter files by name"
+                           style="width:110px;font-size:11px;padding:3px 8px">
                 </div>
                 <div class="pane-list" id="left-list" role="listbox" aria-multiselectable="true" aria-label="Original files">
                     <div class="drop-zone active" id="drop-zone">
@@ -196,6 +208,9 @@
                 <div class="pane-header">
                     <span class="pane-title">New names<span class="pane-count hidden" id="right-count">0</span></span>
                     <div class="stat-chips">
+                        <button id="bulk-matched" class="glass-btn bulk-btn hidden" title="Select every matched row (replaces the current selection)">Matched</button>
+                        <button id="bulk-high" class="glass-btn bulk-btn hidden" title="Select only matches at/above the review threshold (replaces the current selection)">High only</button>
+                        <button id="bulk-clear-unmatched" class="glass-btn bulk-btn hidden" title="Deselect rows without a match — matched selections stay">Clear unmatched</button>
                         <span class="stat stat-hi hidden" id="stat-high"></span>
                         <span class="stat stat-review hidden" id="stat-review"></span>
                     </div>

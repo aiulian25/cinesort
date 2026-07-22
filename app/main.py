@@ -58,7 +58,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.4.0")
+app = FastAPI(title="CineSort", version="1.4.1")
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2140,7 +2140,10 @@ async def get_actions():
 # (deployment-layer knob, same pattern as CINESORT_BROWSE_ROOTS).
 GITHUB_LATEST_URL = "https://api.github.com/repos/aiulian25/cinesort/releases/latest"
 UPDATE_CHECK_INTERVAL = 86400.0
-_update_cache: dict = {"checked_at": 0.0, "result": None}
+# Manual "Check for updates" bypasses the daily window but not this floor —
+# a mashed button must not spam GitHub's unauthenticated rate limit (60/h/IP).
+FORCE_CHECK_MIN_INTERVAL = 30.0
+_update_cache: dict = {"checked_at": 0.0, "result": None, "failed": False}
 
 
 def _version_tuple(v: str) -> tuple:
@@ -2151,15 +2154,24 @@ def _version_tuple(v: str) -> tuple:
         return ()
 
 
-async def _check_update() -> Optional[dict]:
+async def _check_update(force: bool = False) -> tuple:
+    """Returns (update_or_none, check_failed).
+
+    Automatic path: one check per 24 h; a failure also backs off 24 h so an
+    offline LAN never pays the 3 s timeout more than once a day. Forced path
+    (the Settings "Check for updates" button): only the 30 s floor applies —
+    and failure is REPORTED, because a person who explicitly clicked deserves
+    the truth instead of a silent "no update"."""
     if os.environ.get("CINESORT_UPDATE_CHECK", "1") == "0":
-        return None
+        return None, False
     now = time.time()
-    if now - _update_cache["checked_at"] < UPDATE_CHECK_INTERVAL:
-        return _update_cache["result"]
-    # Stamp BEFORE the request so failures also back off for 24 h.
+    window = FORCE_CHECK_MIN_INTERVAL if force else UPDATE_CHECK_INTERVAL
+    if now - _update_cache["checked_at"] < window:
+        return _update_cache["result"], _update_cache["failed"]
+    # Stamp BEFORE the request so failures also back off.
     _update_cache["checked_at"] = now
     _update_cache["result"] = None
+    _update_cache["failed"] = False
     try:
         async with httpx.AsyncClient(
             timeout=3.0, headers={"Accept": "application/vnd.github+json"}
@@ -2190,15 +2202,29 @@ async def _check_update() -> Optional[dict]:
                 ],
             }
     except Exception:
-        pass   # best-effort: no update info beats a slow/failing Settings modal
-    return _update_cache["result"]
+        # Best-effort on the automatic path: no update info beats a slow or
+        # failing Settings modal. The flag lets the forced path be honest.
+        _update_cache["failed"] = True
+    return _update_cache["result"], _update_cache["failed"]
 
 
 @app.get("/api/version")
-async def get_version():
+async def get_version(force: bool = Query(False)):
     """Running version + available update (or null). Never raises; never
-    returns anything sensitive — safe on every build target."""
-    return {"version": app.version, "update": await _check_update()}
+    returns anything sensitive — safe on every build target.
+
+    ?force=1 (the Settings "Check for updates" button) bypasses the daily
+    cache window (30 s floor only) and adds honest status fields:
+    check_disabled when the deployment kill-switch is set — a manual click
+    does not override an admin's CINESORT_UPDATE_CHECK=0 — and check_failed
+    when GitHub could not be reached."""
+    if force and os.environ.get("CINESORT_UPDATE_CHECK", "1") == "0":
+        return {"version": app.version, "update": None, "check_disabled": True}
+    update, failed = await _check_update(force=force)
+    resp = {"version": app.version, "update": update}
+    if force and failed:
+        resp["check_failed"] = True
+    return resp
 
 
 # ─── History Endpoints ─────────────────────────────────────────────────

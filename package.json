@@ -1,6 +1,6 @@
 {
   "name": "cinesort",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "CineSort - Professional media file organizer with smart metadata matching",
   "main": "electron/main.js",
   "author": {

@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.4.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.4.1-green.svg)
 
 ---
 
@@ -38,7 +38,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ### Core
 - **Smart Detection** — Automatically detects movies and TV shows from filenames (season, episode, year, quality tags, release group)
 - **Multi-Source Metadata** — TMDb, TVMaze, and OMDb (IMDb), merged and ranked by confidence
-- **Flexible Renaming** — Template-based naming with a token palette and **live preview**, including flat in-place mode
+- **Flexible Renaming** — Template-based naming with a **live preview** and a click-to-copy token reference in Settings, including flat in-place mode
 - **Rename In-Place** — Rename files without moving them — works on NAS/SMB shares
 - **Multiple Actions** — Rename, Move, Copy, Hard Link, Symlink, Dry-run (Test)
 
@@ -54,7 +54,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ### UI / UX
 - **Modern flat UI, two themes** — **Dark** (default) and **Light**; switch in Settings → Appearance, remembered per device
 - **Folder picker** — Native OS file/folder picker on desktop (reaches your whole filesystem); a rich in-app browser on Docker/web with a shortcuts sidebar, editable path + breadcrumb, type-ahead filter, "media only" toggle, cross-folder multi-select, and full keyboard navigation
-- **Template builder** — Insert `{tokens}` from a palette and see a live preview of the resulting path
+- **Template builder** — Type `{tokens}` with a live preview of the resulting path; the full token reference (click-to-copy, with meanings) lives in Settings → Template tokens
 - **Bulk selection** — One-click "Matched", "High only" (at/above the review threshold), and "Clear unmatched"
 - **Inline conflict resolution** — Resolve duplicate/exists conflicts in place with **Skip** or **Rename → (2)**
 - **Drag & Drop** — Drop files or folders anywhere onto the app window (deb/AppImage, Wayland-aware)
@@ -102,20 +102,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.4.0_amd64.deb # arm64: cinesort_1.4.0_arm64.deb
+sudo dpkg -i cinesort_1.4.1_amd64.deb # arm64: cinesort_1.4.1_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.4.0.x86_64.rpm # arm64: cinesort-1.4.0.aarch64.rpm
+sudo dnf install ./cinesort-1.4.1.x86_64.rpm # arm64: cinesort-1.4.1.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.4.0.AppImage # arm64: CineSort-1.4.0-arm64.AppImage
-./CineSort-1.4.0.AppImage
+chmod +x CineSort-1.4.1.AppImage # arm64: CineSort-1.4.1-arm64.AppImage
+./CineSort-1.4.1.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -213,7 +213,7 @@ Restart the app for changes to take effect when editing the file manually.
 | `TMDB_API_KEY` | *(bundled)* | Custom TMDb v3 API key |
 | `OMDB_API_KEY` | *(none)* | OMDb API key; OMDb is silently disabled without it |
 | `TMDB_LANGUAGE` | *(none — English)* | TMDb metadata language for titles/overviews used in filenames (ISO code, e.g. `de-DE`, `ro-RO`). Also settable in the app Settings. TVmaze/OMDb are English-only. |
-| `CINESORT_UPDATE_CHECK` | `1` | Set to `0` to disable the once-per-day update check against the GitHub releases API (the only non-metadata outbound request; nothing ever auto-installs) |
+| `CINESORT_UPDATE_CHECK` | `1` | Set to `0` to disable update checks against the GitHub releases API — both the once-per-day automatic check and the Settings "Check for updates" button (the only non-metadata outbound request; nothing ever auto-installs) |
 | `CINESORT_LOW_CONFIDENCE` | `0.4` | Matches at/below this score are never auto-selected for renaming (0–1) |
 | `CINESORT_REVIEW_CONFIDENCE` | `0.6` | Matches below this score show the "needs review" marker and count toward "Review N matches" (0–1) |
 | `CINESORT_CACHE_TTL` | `900` | Seconds that provider responses (searches, episode lists) are cached in memory — re-matching the same show costs zero requests within this window. `0` disables caching |
@@ -296,7 +296,7 @@ When a file shows **No match found** in the right pane:
 | **Anime** | `{n}/{n} - {absolute} - {t}` | Absolute-numbered anime |
 | **Flat** | `{n} - {s00e00} - {t}` | Rename in-place, no folders |
 
-Or build your own: type tokens directly, or click them from the **token palette** under the template field — a **live preview** shows the resulting path for the first file as you edit. Available tokens: `{n}`, `{y}`, `{s}`, `{e}`, `{s00e00}`, `{t}`, `{absolute}`, `{source}`, `{vf}`, `{group}`, `{codec}`, `{audio}`, `{edition}`, `{tmdbid}`, `{imdbid}`. Empty tokens collapse cleanly — `{n} ({y}) [{edition}]` renders as `Movie (2010) [Extended]` for an extended cut and plain `Movie (2010)` otherwise, matching Jellyfin/Plex edition naming. The id tokens enable agent hints like `{n} ({y}) [imdbid-{imdbid}]`: `{tmdbid}` is set only for TMDb matches and `{imdbid}` only for OMDb/IMDb matches (TVmaze ids are TVmaze-internal and map to neither); an empty id collapses the whole `[imdbid-…]` hint. `{id}` keeps its source-dependent value for existing templates.
+Or build your own: type tokens directly — the **tokens** link beside the template field opens the full click-to-copy reference (Settings → Template tokens) — and a **live preview** shows the resulting path for the first file as you edit. Available tokens: `{n}`, `{y}`, `{s}`, `{e}`, `{s00e00}`, `{t}`, `{absolute}`, `{source}`, `{vf}`, `{group}`, `{codec}`, `{audio}`, `{edition}`, `{tmdbid}`, `{imdbid}`. Empty tokens collapse cleanly — `{n} ({y}) [{edition}]` renders as `Movie (2010) [Extended]` for an extended cut and plain `Movie (2010)` otherwise, matching Jellyfin/Plex edition naming. The id tokens enable agent hints like `{n} ({y}) [imdbid-{imdbid}]`: `{tmdbid}` is set only for TMDb matches and `{imdbid}` only for OMDb/IMDb matches (TVmaze ids are TVmaze-internal and map to neither); an empty id collapses the whole `[imdbid-…]` hint. `{id}` keeps its source-dependent value for existing templates.
 
 ### 5. Choose an action
 
@@ -536,6 +536,12 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.4.1
+- **Compact interface** — the chrome above the file list shrank from 335 px to ~217 px (controls 36→28 px, rows 42→30 px, tighter type and spacing): roughly **twice the files on screen** at every window size. The Insert-token palette moved to a click-to-copy **Template tokens** reference in Settings (now also documenting the music tokens); a small **tokens** link beside the template field opens it. Presets and the live preview share one row, and the Adult toggle sits inline in the Source label.
+- **Native desktop layout** — on deb/rpm/AppImage the app now runs edge-to-edge inside its window with hairline separators, instead of web-page cards floating in a gutter ("border within a border"). Docker/browser keeps the card look — a browser tab provides no frame of its own.
+- **Check for updates button** — the Settings update card can check on demand instead of waiting out the once-per-day window. Outcomes are honest: update found, up to date ("Checked just now"), or couldn't reach GitHub. A 30 s floor prevents API hammering, and deployments with `CINESORT_UPDATE_CHECK=0` stay fully offline — the button says so rather than sneaking a request.
+- README screenshots recaptured on the new interface.
 
 ### v1.4.0
 - **Watch folders (auto-organize)** — Settings → Watch folders turns CineSort into a hands-off pipeline: up to 10 rules (folder, source, template, action, destination), checked once a minute (`CINESORT_WATCH_INTERVAL`). Files are picked up only after their size settles (half-copied downloads never move), matched headlessly, and renamed **only at high confidence** — every run is a normal, undoable history batch. Ambiguous titles and low-confidence files stay in place, with the reason in the card's activity log. Rules live on `/data` in Docker and survive container updates.

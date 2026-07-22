@@ -21,13 +21,12 @@
     <div class="app">
         <!-- ═══ App bar ═══ -->
         <header class="appbar">
-            <button type="button" class="app-home" id="btn-home" title="Start over — clear the file list and results">
+            <button type="button" class="app-home" id="btn-home" title="CineSort — scan, match, and rename your media. Click to start over.">
                 <div class="logo-tile" aria-hidden="true">
-                    <img src="/static/logo_tile.png" alt="" width="38" height="38">
+                    <img src="/static/logo_tile.png" alt="" width="26" height="26">
                 </div>
                 <div class="app-id">
                     <div class="app-name">CineSort <span class="reset-hint">Start over</span></div>
-                    <div class="app-tag">Scan, match, and rename your media</div>
                 </div>
             </button>
             <div class="appbar-actions">
@@ -66,7 +65,15 @@
         <section class="options glass-panel">
             <div class="options-grid">
                 <div class="field field-source">
-                    <label class="field-label" for="datasource">Source</label>
+                    <!-- Adult toggle sits inline in the label row (density
+                         pass): stacked below the select it stretched the
+                         whole options grid row by 23px. -->
+                    <span class="field-label"><label for="datasource">Source</label>
+                        <label class="cb-label cb-sm adult-inline" title="Include adult-rated titles in TMDB and OMDb search results">
+                            <input type="checkbox" id="include-adult">
+                            <span>Adult</span>
+                        </label>
+                    </span>
                     <select id="datasource" class="glass-select">
                         <optgroup label="Episodes">
                             <option value="tmdb">TMDb</option>
@@ -79,10 +86,6 @@
                             <option value="musicbrainz">MusicBrainz</option>
                         </optgroup>
                     </select>
-                    <label class="cb-label cb-sm" title="Include adult-rated titles in TMDB and OMDb search results">
-                        <input type="checkbox" id="include-adult">
-                        <span>Adult titles</span>
-                    </label>
                 </div>
                 <div class="field">
                     <label class="field-label" for="action">Action</label>
@@ -99,37 +102,27 @@
                     </select>
                 </div>
                 <div class="field field-template">
-                    <label class="field-label" for="template">Naming template</label>
-                    <div style="display:flex;gap:6px">
+                    <label class="field-label" for="template">Template
+                        <button type="button" id="tokens-link" class="tokens-link"
+                                title="Token reference — every {token} with its meaning, click-to-copy">tokens</button>
+                    </label>
+                    <div style="display:flex;gap:5px">
                         <input type="text" id="template" class="glass-input mono" style="flex:1;min-width:0"
                                value="{name} ({year})/{name} ({year})" spellcheck="false">
-                        <button id="template-save" class="glass-btn" title="Save current template as a preset" style="padding:4px 10px;flex-shrink:0">Save</button>
+                        <button id="template-save" class="glass-btn" title="Save current template as a preset" style="flex-shrink:0">Save</button>
                     </div>
                 </div>
                 <div class="field field-dest">
-                    <label class="field-label" for="dest-path">Destination (optional)</label>
+                    <label class="field-label" for="dest-path">Destination</label>
                     <input type="text" id="dest-path" class="glass-input mono"
                            placeholder="Leave empty to organize in place" spellcheck="false">
                 </div>
             </div>
+            <!-- Insert-token palette moved to Settings → Template tokens
+                 (density pass): it was a set-once reference, not a per-file
+                 control. Presets + live preview now share this single row. -->
             <div class="template-row">
-                <span class="row-label">Insert:</span>
-                <div class="template-tokens" id="template-tokens" aria-label="Insert template token">
-                    <button class="token-btn" data-token="{name}" title="Series / movie name">name</button>
-                    <button class="token-btn" data-token="{year}" title="Year">year</button>
-                    <button class="token-btn" data-token="{s00e00}" title="S00E00">s00e00</button>
-                    <button class="token-btn" data-token="{title}" title="Episode title">title</button>
-                    <button class="token-btn" data-token="{absolute}" title="Absolute episode #">abs</button>
-                    <button class="token-btn" data-token="{source}" title="Source (WEB-DL…)">source</button>
-                    <button class="token-btn" data-token="{quality}" title="Video quality (1080p…)">quality</button>
-                    <button class="token-btn" data-token="{group}" title="Release group">group</button>
-                    <button class="token-btn" data-token="{codec}" title="Video codec (x265…)">codec</button>
-                    <button class="token-btn" data-token="{audio}" title="Audio codec (DTS-HD…)">audio</button>
-                    <button class="token-btn" data-token="{edition}" title="Edition (Extended…) — empty when none">edition</button>
-                    <button class="token-btn" data-token="{tmdbid}" title="TMDb id — empty unless matched via TMDb">tmdbid</button>
-                    <button class="token-btn" data-token="{imdbid}" title="IMDb id — empty unless matched via OMDb/IMDb">imdbid</button>
-                </div>
-                <span class="row-label presets-label">Presets:</span>
+                <span class="row-label presets-label" style="margin-left:0">Presets:</span>
                 <div class="template-presets">
                     <button class="preset-btn" data-template="{name}/Season {s}/{name} - {s00e00} - {title}" title="TV Series (organise into folders)">TV</button>
                     <button class="preset-btn" data-template="{name} ({year})/{name} ({year})" title="Movie (organise into folder)">Film</button>
@@ -138,8 +131,8 @@
                     <button class="preset-btn" data-template="{artist}/{album}/{track} - {title}" title="Music (organise into artist/album folders)">Music</button>
                     <span id="custom-presets"></span>
                 </div>
+                <div class="template-preview" id="template-preview" title="Live preview against the first file"></div>
             </div>
-            <div class="template-preview" id="template-preview" title="Live preview against the first file"></div>
         </section>
 
         <!-- ═══ Scan bar ═══ -->
@@ -150,7 +143,7 @@
                 </svg>
                 <input type="text" id="scan-path" class="scanbar-input" placeholder="Enter a folder path, or drag &amp; drop files here…" spellcheck="false">
             </div>
-            <label class="cb-label"><input type="checkbox" id="recursive" checked><span>Include subfolders</span></label>
+            <label class="cb-label" title="Include subfolders when scanning folders"><input type="checkbox" id="recursive" checked><span>Subfolders</span></label>
             <button id="btn-browse" class="glass-btn" title="Browse for a folder">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>

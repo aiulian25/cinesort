@@ -34,8 +34,8 @@ body {
     position: relative; z-index: 1;
     display: flex; flex-direction: column;
     height: 100vh;
-    padding: 12px 16px;
-    gap: 10px;
+    padding: 8px 12px;
+    gap: 6px;
     max-width: 1600px;
     margin: 0 auto;
 }
@@ -49,7 +49,7 @@ body {
 /* Brand block doubles as the "start over" button: hovering (or keyboard-
    focusing) it reveals the hint pill; clicking clears the whole session. */
 .app-home {
-    display: inline-flex; align-items: center; gap: 12px;
+    display: inline-flex; align-items: center; gap: 8px;
     background: none; border: 0; padding: 0; margin: 0;
     font-family: var(--font); text-align: left; cursor: pointer;
     border-radius: var(--radius-xs);
@@ -67,21 +67,21 @@ body {
 .app-home:focus-visible .reset-hint { opacity: 1; transform: none; }
 @media (prefers-reduced-motion: reduce) { .reset-hint { transition: none; } }
 .logo-tile {
-    width: 38px; height: 38px; border-radius: 9px; flex-shrink: 0;
+    width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
     overflow: hidden;
     border: 1px solid var(--border);
     box-shadow: var(--shadow-sm);
 }
 .logo-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .app-id { flex: 1; min-width: 0; }
-.app-name { font-size: 15.5px; font-weight: 700; letter-spacing: -.01em; color: var(--txt); }
-.app-tag  { font-size: 12px; color: var(--txt3); margin-top: 1px; }
+.app-name { font-size: 13.5px; font-weight: 700; letter-spacing: -.01em; color: var(--txt); }
+/* .app-tag removed in the density pass — tagline lives in the button title */
 .appbar-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 /* ─── Buttons ─────────────────────────────────────────────────── */
 .glass-btn {
-    display: inline-flex; align-items: center; gap: 7px;
-    padding: 7px 14px; font-size: 12.5px; font-weight: 600; font-family: var(--font);
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; font-size: 11.5px; font-weight: 600; font-family: var(--font);
     border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
     background: var(--surface-1); color: var(--txt);
     cursor: pointer; white-space: nowrap;
@@ -108,14 +108,14 @@ body {
 
 /* ─── Inputs & selects ────────────────────────────────────────── */
 .glass-select, .glass-input {
-    height: 36px;
+    height: 28px;
     background: var(--input-bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-xs);
     color: var(--txt);
     font-family: var(--font);
-    font-size: 13px; font-weight: 500;
-    padding: 0 12px;
+    font-size: 12px; font-weight: 500;
+    padding: 0 10px;
     outline: none;
     transition: border-color .12s var(--ease), box-shadow .12s var(--ease);
 }
@@ -125,7 +125,7 @@ body {
     box-shadow: 0 0 0 3px var(--accent-t);
 }
 .glass-input::placeholder { color: var(--txt3); }
-.glass-input.mono { font-family: var(--mono); font-size: 12px; }
+.glass-input.mono { font-family: var(--mono); font-size: 11.5px; }
 .glass-select {
     cursor: pointer; appearance: none; padding-right: 30px;
     background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888890' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");
@@ -137,10 +137,10 @@ body {
 /* ─── Checkboxes ──────────────────────────────────────────────── */
 .cb-label {
     display: inline-flex; align-items: center; gap: 7px;
-    font-size: 12.5px; color: var(--txt2); cursor: pointer; white-space: nowrap;
+    font-size: 11.5px; color: var(--txt2); cursor: pointer; white-space: nowrap;
 }
 .cb-label input[type="checkbox"] {
-    appearance: none; width: 16px; height: 16px;
+    appearance: none; width: 14px; height: 14px;
     border: 1px solid var(--border-strong); border-radius: 4px;
     background: var(--surface-2); cursor: pointer; position: relative;
     transition: background .12s var(--ease), border-color .12s var(--ease);
@@ -148,8 +148,8 @@ body {
 }
 .cb-label input:checked { background: var(--accent); border-color: var(--accent); }
 .cb-label input:checked::after {
-    content: ''; position: absolute; left: 4.5px; top: 1.5px;
-    width: 5px; height: 9px;
+    content: ''; position: absolute; left: 3.5px; top: 0.5px;
+    width: 4px; height: 8px;
     border: solid var(--on-accent); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
 }
 .cb-sm { font-size: 12px; }
@@ -163,24 +163,41 @@ body {
 label:has(#include-adult:checked) { color: var(--amber); }
 
 /* ─── Options card ────────────────────────────────────────────── */
-.options { padding: 14px 16px 12px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
+.options { padding: 8px 12px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
 .options-grid {
-    display: grid; grid-template-columns: 170px 170px 1fr 1fr; gap: 14px;
+    display: grid; grid-template-columns: 150px 150px 1fr 1fr; gap: 10px;
     align-items: start;
 }
 .field-dest input:disabled { opacity: .45; cursor: not-allowed; }
-.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.field-label { font-size: 12px; font-weight: 550; color: var(--txt2); }
+.field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.field-label {
+    font-size: 10.5px; font-weight: 600; color: var(--txt2);
+    text-transform: uppercase; letter-spacing: .05em;
+    display: flex; align-items: baseline; gap: 7px;
+}
+/* "tokens" link beside the Template label — opens Settings at the reference
+   card (the showSettings("tokens") scroll-to, same mechanism as the update
+   banner's View update). Lowercase on purpose: it is a link, not a label. */
+.tokens-link {
+    background: none; border: 0; padding: 0; cursor: pointer;
+    font: 550 10.5px var(--font); text-transform: none; letter-spacing: 0;
+    color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.tokens-link:hover { color: var(--accent-hover); }
 .field .glass-select, .field .glass-input { width: 100%; }
-.field-source .cb-sm { margin-top: 2px; }
+/* Adult toggle inline in the Source label row — right-aligned, no height cost */
+.adult-inline { margin-left: auto; gap: 5px; }
+.adult-inline span { font-size: 10.5px; text-transform: none; letter-spacing: 0; }
+.adult-inline input[type="checkbox"] { width: 12px; height: 12px; }
+.adult-inline input:checked::after { left: 3px; top: 0; width: 3.5px; height: 7px; }
 
-.template-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-.row-label { font-size: 12px; color: var(--txt3); flex-shrink: 0; }
+.template-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.row-label { font-size: 10.5px; color: var(--txt3); flex-shrink: 0; }
 .presets-label { margin-left: auto; }
 .template-tokens { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .token-btn {
-    font-family: var(--mono); font-size: 11.5px; font-weight: 550; line-height: 1;
-    padding: 5px 9px; border: 1px solid var(--border); border-radius: 6px;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 550; line-height: 1;
+    padding: 3px 7px; border: 1px solid var(--border); border-radius: 6px;
     background: var(--surface-3); color: var(--txt2); cursor: pointer;
     transition: color .12s var(--ease), border-color .12s var(--ease);
 }
@@ -190,29 +207,32 @@ label:has(#include-adult:checked) { color: var(--amber); }
    buttons flow as flex items beside the built-in five. */
 #custom-presets { display: contents; }
 .preset-btn {
-    font-family: var(--font); font-size: 11.5px; font-weight: 600; line-height: 1;
-    padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px;
+    font-family: var(--font); font-size: 10.5px; font-weight: 600; line-height: 1;
+    padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px;
     background: var(--surface-3); color: var(--txt2); cursor: pointer;
     transition: color .12s var(--ease), border-color .12s var(--ease);
 }
 .preset-btn:hover { color: var(--txt); border-color: var(--border-strong); }
 
+/* Preview shares the presets row (right-aligned, truncating) — the Insert
+   palette moved to Settings, so the freed row absorbed the preview line. */
 .template-preview {
-    font-family: var(--mono); font-size: 12px; line-height: 1.4;
-    color: var(--txt3); word-break: break-all; max-height: 34px; overflow: hidden;
-    min-height: 17px;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.4;
+    color: var(--txt3); overflow: hidden;
+    margin-left: auto; white-space: nowrap; text-overflow: ellipsis;
+    max-width: 55%; min-width: 0;
 }
 .template-preview.preview-error { color: var(--red); }
 
 /* ─── Scan bar ────────────────────────────────────────────────── */
 .scanbar {
-    display: flex; align-items: center; gap: 10px;
-    padding: 10px 12px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px;
     flex-shrink: 0;
 }
 .path-wrap {
-    flex: 1; min-width: 0; height: 38px;
-    display: flex; align-items: center; gap: 9px; padding: 0 12px;
+    flex: 1; min-width: 0; height: 28px;
+    display: flex; align-items: center; gap: 7px; padding: 0 10px;
     background: var(--input-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
     transition: border-color .12s var(--ease), box-shadow .12s var(--ease);
 }
@@ -221,7 +241,7 @@ label:has(#include-adult:checked) { color: var(--amber); }
 .scanbar-input {
     flex: 1; min-width: 0; height: 100%;
     background: transparent; border: none; outline: none;
-    color: var(--txt); font-family: var(--mono); font-size: 12.5px;
+    color: var(--txt); font-family: var(--mono); font-size: 11.5px;
 }
 .scanbar-input::placeholder { color: var(--txt3); }
 
@@ -248,20 +268,20 @@ label:has(#include-adult:checked) { color: var(--amber); }
 
 .pane-header {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    padding: 12px 16px;
-    min-height: 52px;
+    padding: 4px 14px;
+    min-height: 34px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
 }
-.pane-title { font-size: 13px; font-weight: 650; color: var(--txt); display: inline-flex; align-items: baseline; gap: 7px; }
-.pane-count { font-size: 12.5px; font-weight: 550; color: var(--txt3); font-variant-numeric: tabular-nums; }
+.pane-title { font-size: 12.5px; font-weight: 650; color: var(--txt); display: inline-flex; align-items: baseline; gap: 7px; }
+.pane-count { font-size: 11.5px; font-weight: 550; color: var(--txt3); font-variant-numeric: tabular-nums; }
 
 /* Segmented view filter */
 .seg-filter { display: flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px; }
 .seg-btn {
-    font: 600 11.5px var(--font); color: var(--txt3);
+    font: 600 10.5px var(--font); color: var(--txt3);
     background: transparent; border: none; border-radius: 999px;
-    padding: 4px 12px; cursor: pointer;
+    padding: 3px 10px; cursor: pointer;
     transition: color .12s var(--ease);
 }
 .seg-btn:hover { color: var(--txt2); }
@@ -286,9 +306,9 @@ label:has(#include-adult:checked) { color: var(--amber); }
 
 /* ─── Row items ───────────────────────────────────────────────── */
 .row-item {
-    display: flex; align-items: center; gap: 9px;
+    display: flex; align-items: center; gap: 8px;
     height: var(--row-h);
-    padding: 0 16px;
+    padding: 0 14px;
     border-bottom: 1px solid var(--border);
     cursor: default;
     transition: background .12s var(--ease);
@@ -388,14 +408,14 @@ body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px var(--accent-t); }
 
 /* ─── Footer action bar ───────────────────────────────────────── */
 .actionbar {
-    display: flex; align-items: center; gap: 12px;
-    padding: 11px 16px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 12px;
     flex-shrink: 0;
 }
 .footer-hint {
     flex: 1; min-width: 0;
     display: flex; align-items: center; gap: 8px;
-    font-size: 12.5px; color: var(--txt3);
+    font-size: 11.5px; color: var(--txt3);
     overflow: hidden;
 }
 .footer-hint svg { color: var(--txt3); }
@@ -805,6 +825,58 @@ input[type="checkbox"]:focus-visible,
 }
 
 /* ─── Narrow layout ───────────────────────────────────────────── */
+/* ═══ Desktop (Electron) edge-to-edge ═══════════════════════════
+   The OS window already frames the app on deb/rpm/AppImage — the web-page
+   look (floating bordered cards on a canvas gutter) reads as a border
+   inside a border there. Desktop drops the gutters: sections fill the
+   window and are separated by 1px rules. Docker/browser keeps the card
+   look — a browser tab provides no frame of its own. Presentation-only:
+   app.js adds body.desktop from the same isElectron flag the rest of the
+   UI already uses; no behavior differs between targets. */
+body.desktop .app { padding: 0; gap: 0; max-width: none; }
+body.desktop .appbar {
+    padding: 5px 12px;
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border);
+}
+body.desktop .options,
+body.desktop .scanbar,
+body.desktop .dual-pane,
+body.desktop .actionbar {
+    border-radius: 0; box-shadow: none;
+    border-left: 0; border-right: 0; border-top: 0;
+}
+body.desktop .options { padding: 8px 12px 7px; }
+body.desktop .scanbar { padding: 6px 12px; }
+body.desktop .dual-pane { border-bottom: 0; }
+body.desktop .actionbar { border-bottom: 0; border-top: 1px solid var(--border); }
+body.desktop .statusbar { padding: 2px 12px; }
+body.desktop .key-banner,
+body.desktop .update-banner {
+    border-radius: 0; border-left: 0; border-right: 0; margin: 0;
+}
+
+/* ═══ Settings: Template tokens reference card ══════════════════
+   The insert palette's new home — every token with its meaning,
+   click-to-copy. Chips reuse .token-btn. */
+.tokens-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 2px 20px;
+    margin-top: 8px;
+}
+.tokens-grid .tok-item {
+    display: flex; align-items: center; gap: 9px;
+    padding: 2px 0; font-size: 11px; color: var(--txt3); min-width: 0;
+}
+.tokens-grid .tok-item .token-btn { flex-shrink: 0; min-width: 76px; text-align: center; }
+.tokens-grid .tok-item span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tokens-grid .tok-sub {
+    grid-column: 1 / -1; margin-top: 8px;
+    font-size: 10px; font-weight: 650; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--txt3);
+}
+.tokens-copied { font-size: 11px; color: var(--green); min-height: 15px; margin-top: 7px; }
+@media (max-width: 640px) { .tokens-grid { grid-template-columns: 1fr; } }
+
 @media (max-width: 900px) {
     .options-grid { grid-template-columns: 1fr 1fr; }
     .field-template, .field-dest { grid-column: 1 / -1; }

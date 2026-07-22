@@ -12,6 +12,10 @@ let matchResults = [];   // raw from /api/match
 let selectedSet = new Set(); // indices in scannedFiles that are checked
 const isElectron = !!(window.electronAPI && window.electronAPI.isElectron);
 const canShowInFolder = isElectron && typeof window.electronAPI.showInFolder === "function";
+// Desktop presentation: the OS window frames the app, so sections go
+// edge-to-edge (see style.css "Desktop edge-to-edge"). Browser/Docker
+// keeps the card look. Same flag, presentation only.
+if (isElectron) document.body.classList.add("desktop");
 let draggedIdx = null;   // index being dragged
 let draggedFrom = null;  // 'left' or 'right'
 let focusedIdx = null;   // keyboard-focused row (DEL/arrow navigation)
@@ -1535,6 +1539,8 @@ let updPhase = "idle";    // idle | downloading | ready | manual | installing | 
 let updResult = null;     // downloadUpdate() result ({name, pkgType, …})
 let updError = "";
 let updNote = "";         // transient note (e.g. cancelled authorization)
+let updCheckMsg = "";     // manual check outcome (up-to-date / failed / disabled)
+let updCheckWarn = false; // amber styling for failure/disabled outcomes
 
 function updCanAutoDl() {
     return isElectron && window.electronAPI && typeof window.electronAPI.downloadUpdate === "function";
@@ -1551,15 +1557,22 @@ function renderUpdateCard() {
     const upd = v.update;
     const relUrl = (upd && upd.url) || "https://github.com/aiulian25/cinesort/releases";
 
-    // Up to date — the quiet default.
+    // Up to date — the quiet default. "Check for updates" bypasses the
+    // daily window (the backend keeps a 30 s floor and the deployment
+    // kill-switch always wins); the outcome is reported honestly below.
     if (!upd || !upd.latest) {
         slot.innerHTML = `
-            <div class="update-card update-row">
-                <span class="update-chip ok">✓ Up to date</span>
-                <span style="font-weight:650">CineSort v${esc(v.version)}</span>
-                <span class="up-tiny" style="flex:1">checks once per day</span>
-                <a class="up-tiny" href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">Releases on GitHub</a>
+            <div class="update-card">
+                <div class="update-row">
+                    <span class="update-chip ok">✓ Up to date</span>
+                    <span style="font-weight:650">CineSort v${esc(v.version)}</span>
+                    <span class="up-tiny" style="flex:1">automatic check once per day</span>
+                    <button class="glass-btn" id="btn-upd-check" style="flex-shrink:0">Check for updates</button>
+                    <a class="up-tiny" href="${esc(relUrl)}" target="_blank" rel="noopener noreferrer">Releases on GitHub</a>
+                </div>
+                ${updCheckMsg ? `<div class="up-tiny" style="margin-top:6px${updCheckWarn ? ";color:var(--amber)" : ""}">${esc(updCheckMsg)}</div>` : ""}
             </div>`;
+        $id("btn-upd-check")?.addEventListener("click", updCheckNow);
         return;
     }
 
@@ -1665,6 +1678,34 @@ function renderUpdateCard() {
     $id("btn-upd-restart")?.addEventListener("click", () => {
         window.electronAPI.restartApp && window.electronAPI.restartApp();
     });
+}
+
+/* Manual update check (Settings card). force=1 bypasses the 24 h cache;
+   the three outcomes get honest copy — a person who clicked deserves the
+   truth, not a silent "no update" that might be a network failure. */
+async function updCheckNow() {
+    const btn = $id("btn-upd-check");
+    if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+    updCheckMsg = ""; updCheckWarn = false;
+    try {
+        const v = await api("/api/version?force=1");
+        updInfo = v;
+        if (v.check_disabled) {
+            updCheckMsg = "Update checks are disabled on this deployment (CINESORT_UPDATE_CHECK=0).";
+            updCheckWarn = true;
+        } else if (v.check_failed) {
+            updCheckMsg = "Couldn't reach GitHub — check your connection and try again.";
+            updCheckWarn = true;
+        } else if (!(v.update && v.update.latest)) {
+            updCheckMsg = "Checked just now — you're on the latest version.";
+        }
+        // An update found needs no note: the card re-renders into the
+        // "new version available" state right below this line.
+    } catch (err) {
+        updCheckMsg = "Check failed: " + err.message;
+        updCheckWarn = true;
+    }
+    renderUpdateCard();
 }
 
 async function updDownload() {
@@ -1786,6 +1827,29 @@ btnSettings.addEventListener("click", () => showSettings());
 /* ─── Watch folders card (Settings) ────────────────────────────
    Folders/templates/destinations are USER strings — every element is built
    with createElement + textContent/value, never innerHTML (the F38 rule). */
+/* Token reference for the Settings card. Fixed literals (never user data),
+   same descriptions the palette tooltips carried — plus the music tokens the
+   one-line palette never had room to show. */
+const TEMPLATE_TOKENS = [
+    { tok: "{name}", desc: "Series / movie name" },
+    { tok: "{year}", desc: "Year" },
+    { tok: "{s00e00}", desc: "S01E05 — season/episode, range-aware" },
+    { tok: "{title}", desc: "Episode title (all titles for multi-episode files)" },
+    { tok: "{absolute}", desc: "Absolute episode number (anime)" },
+    { tok: "{source}", desc: "Release source (WEB-DL, BluRay…)" },
+    { tok: "{quality}", desc: "Video quality (1080p…)" },
+    { tok: "{group}", desc: "Release group" },
+    { tok: "{codec}", desc: "Video codec (x265…)" },
+    { tok: "{audio}", desc: "Audio codec (DTS-HD…)" },
+    { tok: "{edition}", desc: "Edition (Extended…) — empty when none" },
+    { tok: "{tmdbid}", desc: "TMDb id — empty unless matched via TMDb" },
+    { tok: "{imdbid}", desc: "IMDb id — empty unless via OMDb/IMDb" },
+    { sub: "Music" },
+    { tok: "{artist}", desc: "Track artist" },
+    { tok: "{album}", desc: "Album title" },
+    { tok: "{track}", desc: "Track number, zero-padded" },
+];
+
 async function renderWatchesCard() {
     const slot = $id("watches-card-slot");
     if (!slot) return;
@@ -1971,6 +2035,20 @@ async function showSettings(scrollTo) {
                    maxlength="5" autocomplete="off" spellcheck="false">
         </div>
 
+        <div class="settings-row" id="tokens-card">
+            <div class="settings-label"><span>Template tokens</span></div>
+            <p class="settings-hint">
+                Click a token to copy it, then paste it into the naming template.
+                Empty tokens collapse cleanly — brackets around them disappear
+                when there is no value.
+            </p>
+            <div class="tokens-grid">${TEMPLATE_TOKENS.map(t => t.sub
+                ? `<div class="tok-sub">${t.sub}</div>`
+                : `<div class="tok-item"><button class="token-btn" data-tok="${t.tok}">${t.tok}</button><span>${t.desc}</span></div>`
+            ).join("")}</div>
+            <div class="tokens-copied" id="tokens-copied"></div>
+        </div>
+
         <div id="watches-card-slot"></div>
 
         <div id="update-card-slot"></div>
@@ -2007,6 +2085,21 @@ async function showSettings(scrollTo) {
     modalBody.querySelectorAll(".theme-swatch").forEach(sw => {
         sw.addEventListener("click", () => applyTheme(sw.dataset.theme));
     });
+
+    // Template tokens: click-to-copy with inline confirmation (the main
+    // status bar sits behind the modal, so feedback lives in the card).
+    $id("tokens-card")?.addEventListener("click", e => {
+        const btn = e.target.closest(".token-btn[data-tok]");
+        if (!btn) return;
+        const tok = btn.dataset.tok;
+        navigator.clipboard.writeText(tok).then(() => {
+            const msg = $id("tokens-copied");
+            if (msg) msg.textContent = `Copied ${tok} — paste it into the naming template.`;
+        }).catch(() => { /* clipboard unavailable — selection still possible */ });
+    });
+    if (scrollTo === "tokens") {
+        $id("tokens-card")?.scrollIntoView({ block: "center" });
+    }
 
     // Show/hide toggles
     modalBody.querySelectorAll(".settings-eye").forEach(btn => {
@@ -3214,20 +3307,11 @@ document.querySelectorAll(".preset-btn[data-template]").forEach(btn => {
     });
 });
 
-/* ─── Template token palette (insert at cursor) ───────────────── */
-document.querySelectorAll(".token-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-        const tok = btn.dataset.token;
-        const start = elTemplate.selectionStart ?? elTemplate.value.length;
-        const end   = elTemplate.selectionEnd ?? elTemplate.value.length;
-        elTemplate.value = elTemplate.value.slice(0, start) + tok + elTemplate.value.slice(end);
-        const caret = start + tok.length;
-        elTemplate.focus();
-        elTemplate.setSelectionRange(caret, caret);
-        persistPrefs();
-        updateTemplatePreview();
-    });
-});
+/* ─── Template tokens ─────────────────────────────────────────────
+   The insert palette moved to Settings → Template tokens (density pass).
+   The "tokens" link beside the Template label opens Settings scrolled to
+   the reference card — the same scroll-to mechanism the update banner uses. */
+$id("tokens-link")?.addEventListener("click", () => showSettings("tokens"));
 
 /* ─── Bulk selection actions (operate on the left-pane checkboxes) ── */
 function bulkSelect(predicate) {

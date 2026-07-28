@@ -77,11 +77,12 @@ class TMDbClient:
         self,
         query: str,
         year: Optional[int] = None,
-        include_adult: bool = False,
     ) -> list[TMDbResult]:
         if not self.enabled:
             return []
-        params = {"query": query, "include_adult": "true" if include_adult else "false"}
+        # Always unfiltered — CineSort organizes files the user already has, so
+        # there is nothing to gate. (TMDb hides adult titles unless asked.)
+        params = {"query": query, "include_adult": "true"}
         if year:
             params["year"] = str(year)
         resp = await self._client.get("/search/movie", params=params)

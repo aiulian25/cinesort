@@ -15,9 +15,16 @@ body {
     color: var(--txt);
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
-    /* prevent the browser from opening dropped files */
-    user-select: none;
+    /* All text is selectable/copyable (filenames, new names, dialog text,
+       status, everywhere). Interactive chrome (buttons, icons) opts out
+       below. File-drop opening is prevented in JS (preventDefault on drop),
+       not by user-select. */
+    user-select: text;
 }
+
+/* Chrome controls carry actions, not data — don't let a click/double-click
+   accidentally select their labels or icons. */
+button, .seg-btn, svg { user-select: none; }
 
 .hidden { display: none !important; }
 
@@ -152,15 +159,8 @@ body {
     width: 4px; height: 8px;
     border: solid var(--on-accent); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
 }
-.cb-sm { font-size: 12px; }
-.cb-sm input[type="checkbox"] { width: 14px; height: 14px; }
-.cb-sm input:checked::after { left: 3.5px; top: 0.5px; width: 4px; height: 8px; }
-
 /* "Include subfolders" — orange, per the approved design */
 #recursive:checked { background: var(--orange); border-color: var(--orange); }
-/* Adult toggle — amber to signal the content gate is open */
-#include-adult:checked { background: var(--amber); border-color: var(--amber); }
-label:has(#include-adult:checked) { color: var(--amber); }
 
 /* ─── Options card ────────────────────────────────────────────── */
 .options { padding: 8px 12px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -185,11 +185,6 @@ label:has(#include-adult:checked) { color: var(--amber); }
 }
 .tokens-link:hover { color: var(--accent-hover); }
 .field .glass-select, .field .glass-input { width: 100%; }
-/* Adult toggle inline in the Source label row — right-aligned, no height cost */
-.adult-inline { margin-left: auto; gap: 5px; }
-.adult-inline span { font-size: 10.5px; text-transform: none; letter-spacing: 0; }
-.adult-inline input[type="checkbox"] { width: 12px; height: 12px; }
-.adult-inline input:checked::after { left: 3px; top: 0; width: 3.5px; height: 7px; }
 
 .template-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .row-label { font-size: 10.5px; color: var(--txt3); flex-shrink: 0; }
@@ -213,6 +208,12 @@ label:has(#include-adult:checked) { color: var(--amber); }
     transition: color .12s var(--ease), border-color .12s var(--ease);
 }
 .preset-btn:hover { color: var(--txt); border-color: var(--border-strong); }
+/* The active preset (or custom preset) the current template matches — so it's
+   obvious at a glance whether you're renaming Film, TV, Anime, or Music. */
+.preset-btn.active {
+    color: var(--accent); border-color: var(--accent);
+    background: var(--accent-t); font-weight: 700;
+}
 
 /* Preview shares the presets row (right-aligned, truncating) — the Insert
    palette moved to Settings, so the freed row absorbed the preview line. */
@@ -221,8 +222,18 @@ label:has(#include-adult:checked) { color: var(--amber); }
     color: var(--txt3); overflow: hidden;
     margin-left: auto; white-space: nowrap; text-overflow: ellipsis;
     max-width: 55%; min-width: 0;
+    display: flex; align-items: center; gap: 5px;
 }
 .template-preview.preview-error { color: var(--red); }
+/* Kind tag before the preview path ("FILM →  Movie Name (2024)/…") so the
+   output can't be mistaken for a different media type. */
+.preview-kind {
+    flex-shrink: 0;
+    font: 700 9.5px var(--font); text-transform: uppercase; letter-spacing: .05em;
+    color: var(--accent); background: var(--accent-t);
+    padding: 1px 7px; border-radius: 10px;
+}
+.template-preview .preview-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* ─── Scan bar ────────────────────────────────────────────────── */
 .scanbar {
@@ -344,6 +355,11 @@ label:has(#include-adult:checked) { color: var(--amber); }
     flex: 1; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     font-size: 12.5px;
+    /* Selectable even though the row is draggable — a mousedown here disables
+       the row's drag for the gesture (see setupRowTextSelection in app.js), so
+       dragging across the name selects it; dragging elsewhere reorders. The
+       text cursor advertises that. */
+    user-select: text; cursor: text;
 }
 .row-text.original { font-family: var(--mono); font-size: 12px; color: var(--txt2); }
 .row-text.newname { color: var(--txt); }
@@ -406,30 +422,9 @@ label:has(#include-adult:checked) { color: var(--amber); }
 }
 body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px var(--accent-t); }
 
-/* ─── Footer action bar ───────────────────────────────────────── */
-.actionbar {
-    display: flex; align-items: center; gap: 10px;
-    padding: 6px 12px;
-    flex-shrink: 0;
-}
-.footer-hint {
-    flex: 1; min-width: 0;
-    display: flex; align-items: center; gap: 8px;
-    font-size: 11.5px; color: var(--txt3);
-    overflow: hidden;
-}
-.footer-hint svg { color: var(--txt3); }
-.action-hint-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.footer-ready { color: var(--txt2); font-weight: 600; white-space: nowrap; flex-shrink: 0; }
-
-/* action-specific hint colors (text only; footer stays quiet) */
-.action-hint-rename   { color: var(--green); }
-.action-hint-test     { color: var(--info); }
-.action-hint-move,
-.action-hint-keeplink,
-.action-hint-copy     { color: var(--amber); }
-.action-hint-hardlink,
-.action-hint-symlink  { color: var(--red); }
+/* Footer action bar removed — Rename lives in the scan bar (right of Match),
+   Review in the New names header. The scan-bar Rename keeps its primary +
+   green-check styling via .btn-primary.btn-rename above. */
 
 /* ─── Modal ───────────────────────────────────────────────────── */
 .modal-overlay {
@@ -597,6 +592,19 @@ body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px var(--accent-t); }
 .settings-badge { font-size: 10.5px; padding: 1px 8px; border-radius: 999px; font-weight: 550; }
 .settings-badge.ok      { color: var(--green); background: var(--green-t); }
 .settings-badge.missing { color: var(--txt3); background: var(--surface-2); }
+/* Remove a saved key (shown only for keys stored in keys.env) */
+.settings-remove {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 5px;
+    font: 600 11px var(--font); color: var(--red);
+    background: transparent; border: 1px solid rgba(239, 68, 68, .45);
+    border-radius: 7px; padding: 3px 9px; cursor: pointer;
+    transition: background .12s var(--ease), border-color .12s var(--ease);
+}
+.settings-remove:hover { background: var(--red-t); border-color: var(--red); }
+.settings-remove svg { width: 12px; height: 12px; }
+/* Active key that came from the environment (Docker compose / systemd) —
+   managed there, not removable from the UI. */
+.settings-envnote { margin-left: auto; font-size: 10.5px; color: var(--txt3); font-style: italic; }
 .settings-hint { font-size: 11.5px; color: var(--txt3); margin-bottom: 8px; line-height: 1.6; }
 .settings-hint a { color: var(--accent); text-decoration: none; }
 .settings-hint a:hover { text-decoration: underline; }
@@ -709,7 +717,7 @@ body.dragging-over .pane-left { box-shadow: inset 0 0 0 2px var(--accent-t); }
     border-bottom: 1px solid var(--border);
     cursor: default;
     transition: background .12s var(--ease);
-    user-select: none;
+    user-select: text;   /* folder/file names in the browser are copyable */
 }
 .browser-item:last-child { border-bottom: none; }
 .browser-item:hover { background: var(--surface-2); }
@@ -841,15 +849,13 @@ body.desktop .appbar {
 }
 body.desktop .options,
 body.desktop .scanbar,
-body.desktop .dual-pane,
-body.desktop .actionbar {
+body.desktop .dual-pane {
     border-radius: 0; box-shadow: none;
     border-left: 0; border-right: 0; border-top: 0;
 }
 body.desktop .options { padding: 8px 12px 7px; }
 body.desktop .scanbar { padding: 6px 12px; }
 body.desktop .dual-pane { border-bottom: 0; }
-body.desktop .actionbar { border-bottom: 0; border-top: 1px solid var(--border); }
 body.desktop .statusbar { padding: 2px 12px; }
 body.desktop .key-banner,
 body.desktop .update-banner {

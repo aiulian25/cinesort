@@ -65,15 +65,7 @@
         <section class="options glass-panel">
             <div class="options-grid">
                 <div class="field field-source">
-                    <!-- Adult toggle sits inline in the label row (density
-                         pass): stacked below the select it stretched the
-                         whole options grid row by 23px. -->
-                    <span class="field-label"><label for="datasource">Source</label>
-                        <label class="cb-label cb-sm adult-inline" title="Include adult-rated titles in TMDB and OMDb search results">
-                            <input type="checkbox" id="include-adult">
-                            <span>Adult</span>
-                        </label>
-                    </span>
+                    <label class="field-label" for="datasource">Source</label>
                     <select id="datasource" class="glass-select">
                         <optgroup label="Episodes">
                             <option value="tmdb">TMDb</option>
@@ -114,8 +106,16 @@
                 </div>
                 <div class="field field-dest">
                     <label class="field-label" for="dest-path">Destination</label>
-                    <input type="text" id="dest-path" class="glass-input mono"
-                           placeholder="Leave empty to organize in place" spellcheck="false">
+                    <div style="display:flex;gap:5px">
+                        <input type="text" id="dest-path" class="glass-input mono" style="flex:1;min-width:0"
+                               placeholder="Leave empty to organize in place" spellcheck="false">
+                        <button id="btn-dest-browse" class="glass-btn" title="Browse for a destination folder" style="flex-shrink:0">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            Browse
+                        </button>
+                    </div>
                 </div>
             </div>
             <!-- Insert-token palette moved to Settings → Template tokens
@@ -158,6 +158,13 @@
             <button id="btn-match" class="glass-btn btn-primary" disabled>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
                 Match
+            </button>
+            <!-- Rename lives here, right of Match, so the top bar reads as the
+                 workflow: Scan → Match → Rename. Stays disabled until matched
+                 files are selected. -->
+            <button id="btn-rename" class="glass-btn btn-primary btn-rename" disabled>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
+                <span class="btn-label">Rename</span>
             </button>
         </section>
 
@@ -206,6 +213,7 @@
                         <button id="bulk-clear-unmatched" class="glass-btn bulk-btn hidden" title="Deselect rows without a match — matched selections stay">Clear unmatched</button>
                         <span class="stat stat-hi hidden" id="stat-high"></span>
                         <span class="stat stat-review hidden" id="stat-review"></span>
+                        <button id="btn-review" class="glass-btn bulk-btn hidden" title="Jump to the first match that needs review">Review</button>
                     </div>
                 </div>
                 <div class="pane-list" id="right-list" role="listbox" aria-label="New names">
@@ -216,19 +224,9 @@
             </div>
         </div>
 
-        <!-- ═══ Footer action bar ═══ -->
-        <footer class="actionbar glass-panel">
-            <div class="footer-hint">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-                <span id="footer-hint-action" class="action-hint-text"></span>
-                <b id="footer-ready" class="footer-ready"></b>
-            </div>
-            <button id="btn-review" class="glass-btn hidden" title="Jump to the first match that needs review">Review</button>
-            <button id="btn-rename" class="glass-btn btn-primary btn-rename" disabled>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6 9 17l-5-5"/></svg>
-                <span class="btn-label">Rename</span>
-            </button>
-        </footer>
+        <!-- Footer action bar removed: Rename moved to the top bar (right of
+             Match), Review to the New names header; the ready-count was
+             redundant with the Rename button label + confidence chips. -->
 
         <!-- Floating "scroll to top" — appears once the file list is scrolled down -->
         <button id="go-top" class="go-top" title="Scroll to top" aria-label="Scroll to top">

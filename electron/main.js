@@ -14,29 +14,50 @@ const net = require("net");
 // drop — returns empty paths. Disabling the OS-level sandbox here restores DnD
 // while contextIsolation + contextBridge remain in effect for JS isolation.
 //
-// For Wayland sessions: Electron defaults to XWayland mode. Native-Wayland file
-// managers (Nautilus, Dolphin ≥ 23) cannot DnD into XWayland windows at the
-// compositor level. Switching to ozone/Wayland mode fixes cross-app DnD.
 if (process.platform === "linux") {
     app.commandLine.appendSwitch("no-sandbox");
     app.commandLine.appendSwitch("disable-gpu-sandbox");
-    // Run under XWayland rather than native Wayland. On hybrid GPU systems
-    // (NVIDIA Optimus + Intel) the native Wayland ozone backend fights with
-    // the GPU compositor and produces a blank window. XWayland composites
-    // through Xorg which handles Optimus transparently, and drag-and-drop
-    // works correctly because Electron and the file manager share the same
-    // X11 surface. The no-sandbox flag above already fixes DnD path access.
+
+    // ── Display backend: native Wayland when the session is Wayland ────────────
+    // Drag-and-drop FROM a native-Wayland file manager (Nautilus, Dolphin ≥ 23,
+    // Nautilus/GTK4) into the window ONLY works when Electron owns a native
+    // Wayland surface. Under XWayland — Electron's Linux default — the Wayland
+    // compositor refuses to route the cross-protocol drag, so the drop is
+    // discarded before any `dragenter` reaches the renderer: to the user,
+    // "nothing happens." "auto" selects native Wayland on a Wayland session and
+    // X11 on an X11 session, so a single build does the right thing on both.
     //
-    // ── Black-window fix ──────────────────────────────────────────────────────
+    // Why this is safe now (it wasn't before): native Wayland was previously
+    // avoided because on hybrid GPUs (NVIDIA Optimus + Intel) the ozone Wayland
+    // backend fought the GPU compositor and produced a BLANK window. That was a
+    // GPU-compositing failure — and the software compositing forced just below
+    // (disableHardwareAcceleration + disable-gpu-compositing, kept from the
+    // XWayland black-window fix) removes the GPU compositing path entirely.
+    // Painting then goes through Wayland shared-memory buffers (wl_shm), the
+    // most compositor-agnostic path there is, so the window paints reliably on
+    // native Wayland too. Software compositing is what fixes BOTH window bugs
+    // AND unblocks DnD — the two fixes reinforce each other.
+    //
+    // Escape hatch: CINESORT_OZONE=x11 forces the old XWayland behavior for any
+    // setup that regresses (DnD stays broken there, but the window is
+    // guaranteed to paint); CINESORT_OZONE=wayland forces native Wayland.
+    const ozone = process.env.CINESORT_OZONE;
+    const hint = ozone === "x11" ? "x11" : ozone === "wayland" ? "wayland" : "auto";
+    app.commandLine.appendSwitch("ozone-platform-hint", hint);
+
+    // ── Black-window / blank-window fix ────────────────────────────────────────
     // Under XWayland, GPU compositing produces an all-black window on many
-    // Linux/Wayland setups (Intel + Wayland confirmed). The page itself renders
-    // fine (verified via offscreen capturePage), so the failure is purely GPU
+    // Linux/Wayland setups (Intel + Wayland confirmed); under native Wayland on
+    // hybrid GPUs it produced a blank window. The page itself renders fine
+    // (verified via offscreen capturePage), so the failure is purely GPU
     // compositing to the on-screen surface. Disabling hardware acceleration
     // forces software compositing, which paints reliably everywhere — across
-    // X11, XWayland, Intel/AMD/NVIDIA. This UI is lightweight (static panels +
-    // CSS blur), so the CPU cost is negligible. Correctness for every machine
-    // beats marginal GPU smoothness on the ones where it already worked.
-    // Allow power users to opt back into GPU with CINESORT_ENABLE_GPU=1.
+    // X11, XWayland, native Wayland, Intel/AMD/NVIDIA. This UI is lightweight
+    // (static panels + CSS blur), so the CPU cost is negligible. Correctness for
+    // every machine beats marginal GPU smoothness on the ones where it already
+    // worked. Power users can opt back into GPU with CINESORT_ENABLE_GPU=1
+    // (note: on a hybrid-GPU Wayland session that may reintroduce the blank
+    // window — pair it with CINESORT_OZONE=x11 if so).
     if (process.env.CINESORT_ENABLE_GPU !== "1") {
         app.disableHardwareAcceleration();
         app.commandLine.appendSwitch("disable-gpu-compositing");

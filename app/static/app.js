@@ -49,8 +49,8 @@ const elRecursive   = $id("recursive");
 const elTemplate    = $id("template");
 const elSource      = $id("datasource");
 const elAction      = $id("action");
-const elIncludeAdult = $id("include-adult");
 const elDest        = $id("dest-path");
+const elDestBrowse  = $id("btn-dest-browse");
 
 const btnScan   = $id("btn-scan");
 const btnBrowse = $id("btn-browse");
@@ -78,8 +78,6 @@ const bannerOpenSettings = $id("banner-open-settings");
 const bannerDismiss    = $id("banner-dismiss");
 
 const btnReview        = $id("btn-review");
-const footerHintAction = $id("footer-hint-action");
-const footerReady      = $id("footer-ready");
 const statHigh         = $id("stat-high");
 const statReview       = $id("stat-review");
 
@@ -101,14 +99,14 @@ function rowHiddenCls(i) {
     return "";
 }
 
-/* Footer action bar: live "N of M files ready", Rename label, Review button. */
+/* Action controls: Rename button (label + enabled), Review button, the
+   confidence chips, and the bulk-selection buttons — all in the top bar / New
+   names header now that the footer is gone. */
 function updateFooter() {
-    const total = scannedFiles.length;
-    let ready = 0, review = 0, hasMatch = false;
+    let ready = 0, review = 0;
     for (let i = 0; i < scannedFiles.length; i++) {
         const m = matchResults[i];
         if (m && m.matched) {
-            hasMatch = true;
             if (selectedSet.has(i)) ready++;
             if (!m.manual && m.score < REVIEW_CONFIDENCE) review++;
         }
@@ -119,11 +117,6 @@ function updateFooter() {
     if (btnReview) {
         btnReview.classList.toggle("hidden", review === 0);
         btnReview.textContent = `Review ${review} match${review === 1 ? "" : "es"}`;
-    }
-    if (footerReady) {
-        footerReady.textContent = hasMatch
-            ? `${ready} of ${total} files ready.`
-            : (total > 0 ? `${total} file${total === 1 ? "" : "s"} scanned.` : "");
     }
     if (statHigh && statReview) {
         const high = matchResults.filter(r => r && r.matched && (r.manual || r.score >= REVIEW_CONFIDENCE)).length;
@@ -684,36 +677,22 @@ function esc(s) {
     return d.innerHTML;
 }
 
-/* ─── Action hint (footer bar) ────────────────────────────── */
-/* Fallback hints — overwritten by the server's copy from GET /api/actions
-   (initActions), so backend and UI text can't drift. */
-const ACTION_HINTS = {
-    rename:   "Rename in place — files stay in their current folders.",
-    test:     "Dry run — nothing changes on disk.",
-    move:     "Move relocates files into new folders — they leave this location.",
-    keeplink: "Moves the file and leaves a symlink at the old path — torrents keep seeding. Not for SMB/FAT.",
-    copy:     "Copy keeps originals and creates renamed copies.",
-    hardlink: "Hard link — same file, second name. Same filesystem only.",
-    symlink:  "Symlink points back to the original. Not for SMB/FAT.",
-};
-
-function updateActionHint() {
-    if (!footerHintAction) return;
-    const hint = ACTION_HINTS[elAction.value];
-    footerHintAction.textContent = hint || "";
-    footerHintAction.className = "action-hint-text action-hint-" + elAction.value;
-    // Rename (in-place) never moves files — the destination cannot apply.
-    if (elDest) {
-        const inPlace = elAction.value === "rename";
-        elDest.disabled = inPlace;
-        elDest.title = inPlace
-            ? "Rename (in-place) never moves files — destination not used"
-            : "Optional: build template paths under this folder instead of next to each file";
-    }
+/* ─── Action → Destination availability ───────────────────────
+   Rename (in-place) never moves files, so the Destination field + Browse
+   can't apply — disable them. (The old per-action explanation line was
+   removed; the action labels are self-explanatory.) */
+function updateActionUI() {
+    if (!elDest) return;
+    const inPlace = elAction.value === "rename";
+    elDest.disabled = inPlace;
+    if (elDestBrowse) elDestBrowse.disabled = inPlace;
+    elDest.title = inPlace
+        ? "Rename (in-place) never moves files — destination not used"
+        : "Optional: build template paths under this folder instead of next to each file";
 }
 
 elAction.addEventListener("change", () => {
-    updateActionHint();
+    updateActionUI();
     persistPrefs();
     // Refresh the right pane so the preview reflects the new action mode
     if (matchResults.some(r => r && r.matched)) renderRight();
@@ -768,7 +747,7 @@ function restorePrefs() {
 }
 restorePrefs();
 
-updateActionHint(); // run once on load (after prefs restore so it reflects the saved action)
+updateActionUI(); // run once on load (after prefs restore so it reflects the saved action)
 
 /* ─── Custom template presets ─────────────────────────────────
    Saved under their own localStorage key (same per-origin persistence as
@@ -823,6 +802,8 @@ function renderCustomPresets() {
         });
         slot.appendChild(btn);
     });
+    // A saved preset may match the current template — reflect its active state.
+    if (typeof highlightActivePreset === "function") highlightActivePreset();
 }
 
 $id("template-save")?.addEventListener("click", () => {
@@ -891,15 +872,49 @@ renderCustomPresets();   // initial render from storage
         o.value = a.value;
         o.textContent = a.label || a.value;
         elAction.appendChild(o);
-        if (a.hint) ACTION_HINTS[a.value] = a.hint;
     }
     if ([...elAction.options].some(o => o.value === saved)) elAction.value = saved;
-    updateActionHint();
+    updateActionUI();
 })();
 
 
 elScanPath.addEventListener("keydown", e => { if (e.key === "Enter") doScan(); });
 elDest?.addEventListener("input", persistPrefs);
+
+/* ─── Destination browse ──────────────────────────────────────
+   Same thin adapter as the scan Browse button: native OS folder picker on
+   desktop (reaches $HOME/mounts, can create a new folder), the allow-listed
+   HTML browser (mounted volumes only) on Docker/web. Both write the chosen
+   folder into #dest-path. */
+function setDestination(dir) {
+    if (!elDest || !dir) return;
+    elDest.value = dir;
+    persistPrefs();
+    status(`Destination: ${dir}`);
+    setTimeout(() => statusHide(), 1800);
+}
+async function pickDestFolder() {
+    let paths = [];
+    try {
+        paths = await window.electronAPI.pickPaths({
+            properties: ["openDirectory", "createDirectory", "showHiddenFiles"],
+        });
+    } catch (err) {
+        statusDone("Picker failed: " + err.message);
+        return;
+    }
+    if (paths && paths[0]) setDestination(paths[0]);   // single folder (no multiSelections)
+}
+elDestBrowse?.addEventListener("click", () => {
+    if (elDestBrowse.disabled) return;
+    if (isElectron && typeof window.electronAPI.pickPaths === "function") {
+        pickDestFolder();
+    } else {
+        // Start where the field already points (if valid), else the default root.
+        showBrowseDialog(elDest?.value.trim() || undefined,
+                         { mode: "pickFolder", onPick: setDestination });
+    }
+});
 // The toolbar Scan button previously had no handler — clicking it did nothing
 // (scan only worked via Enter in the path field or the Browse dialog). Wire it.
 btnScan.addEventListener("click", doScan);
@@ -1007,8 +1022,12 @@ async function getBrowseRoots() {
     return _browseRootsCache;
 }
 
-async function showBrowseDialog(startPath) {
-    modalTitle.textContent = "Browse Folders";
+async function showBrowseDialog(startPath, opts = {}) {
+    // mode "scan" (default): multi-select files/folders → scanPaths.
+    // mode "pickFolder": navigate to ONE folder and commit it via opts.onPick
+    // (the Destination browse). Same allow-listed /api/browse either way.
+    const pickFolder = opts.mode === "pickFolder";
+    modalTitle.textContent = pickFolder ? "Choose Destination Folder" : "Browse Folders";
     // Wide, height-aware modal variant; removed again by R.closeModal().
     modalOverlay.classList.add("modal-wide");
 
@@ -1090,13 +1109,21 @@ async function showBrowseDialog(startPath) {
         if (error) {
             main += `<p class="browse-error">${esc(error)}</p>`;
         }
-        main += `<div id="browser-list" tabindex="0" class="browse-list" role="listbox" aria-multiselectable="true" aria-label="Folder contents"></div>`;
-        main += `<div class="browse-tray" id="browse-tray"></div>`;
-        main += `<div class="browse-actions">
-            <button class="glass-btn" id="browse-select-visible">Select Visible</button>
-            <button class="glass-btn" id="browse-cancel">Cancel</button>
-            <button class="glass-btn btn-scan" id="browse-scan">Scan</button>
-        </div>`;
+        main += `<div id="browser-list" tabindex="0" class="browse-list" role="listbox" aria-multiselectable="${!pickFolder}" aria-label="Folder contents"></div>`;
+        if (pickFolder) {
+            main += `<div class="browse-tray" id="browse-tray"></div>`;
+            main += `<div class="browse-actions">
+                <button class="glass-btn" id="browse-cancel">Cancel</button>
+                <button class="glass-btn btn-scan" id="browse-use">Use this folder</button>
+            </div>`;
+        } else {
+            main += `<div class="browse-tray" id="browse-tray"></div>`;
+            main += `<div class="browse-actions">
+                <button class="glass-btn" id="browse-select-visible">Select Visible</button>
+                <button class="glass-btn" id="browse-cancel">Cancel</button>
+                <button class="glass-btn btn-scan" id="browse-scan">Scan</button>
+            </div>`;
+        }
         main += `</div>`;
 
         modalBody.innerHTML = `<div class="browse-wrap">${side}${main}</div>`;
@@ -1121,14 +1148,15 @@ async function showBrowseDialog(startPath) {
 
         $id("browse-mediaonly").addEventListener("change", e => { mediaOnly = e.target.checked; kbIndex = -1; renderList(); });
 
-        $id("browse-select-visible").addEventListener("click", () => {
+        $id("browse-select-visible")?.addEventListener("click", () => {
             for (const item of visibleItems()) {
                 if (item.type !== "parent") selectedPaths.add(item.path);
             }
             renderList();
         });
         $id("browse-cancel").addEventListener("click", () => R.closeModal());
-        $id("browse-scan").addEventListener("click", doScanSelection);
+        $id("browse-scan")?.addEventListener("click", doScanSelection);
+        $id("browse-use")?.addEventListener("click", commitFolderPick);
 
         // Keyboard navigation — attached once per chrome render (the list element
         // persists across cheap renderList() calls, so wiring it there would
@@ -1156,8 +1184,9 @@ async function showBrowseDialog(startPath) {
                 if (e.key === "Enter") {
                     e.preventDefault();
                     if (it.type === "directory" || it.type === "parent") loadPath(it.path);
+                    else if (pickFolder) commitFolderPick();   // files aren't the target — use the folder we're in
                     else doScanSelection();
-                } else if (e.key === " ") {
+                } else if (e.key === " " && !pickFolder) {
                     e.preventDefault();
                     if (it.type !== "parent") {
                         if (selectedPaths.has(it.path)) selectedPaths.delete(it.path); else selectedPaths.add(it.path);
@@ -1188,7 +1217,9 @@ async function showBrowseDialog(startPath) {
                 const size = item.size != null ? fmt(item.size) : "";
                 const checked = selectedPaths.has(item.path) ? "checked" : "";
                 const kb = (i === kbIndex) ? " kb-focus" : "";
-                const checkbox = isParent ? "" : `<input type="checkbox" ${checked} data-idx="${i}" aria-label="Select ${esc(item.name)}">`;
+                // pickFolder mode: no checkboxes — you navigate to a folder and
+                // commit it; files play no part in choosing a destination.
+                const checkbox = (isParent || pickFolder) ? "" : `<input type="checkbox" ${checked} data-idx="${i}" aria-label="Select ${esc(item.name)}">`;
                 const ariaSel = isParent ? "" : ` role="option" aria-selected="${selectedPaths.has(item.path)}"`;
                 html += `<div class="browser-item${isDir ? " browser-dir" : ""}${kb}"${ariaSel} data-path="${esc(item.path)}" data-idx="${i}" data-is-dir="${isDir}" data-is-parent="${isParent}">
                     ${checkbox}
@@ -1219,6 +1250,7 @@ async function showBrowseDialog(startPath) {
             el.addEventListener("click", e => {
                 if (e.target.tagName === "INPUT") return;
                 if (el.dataset.isDir === "true") { loadPath(el.dataset.path); return; }
+                if (pickFolder) return;   // files don't select in destination mode
                 const cb = el.querySelector('input[type="checkbox"]');
                 if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event("change")); }
             });
@@ -1234,6 +1266,13 @@ async function showBrowseDialog(startPath) {
 
     function updateTray() {
         const tray = $id("browse-tray");
+        if (pickFolder) {
+            if (tray) tray.innerHTML =
+                `<span class="browse-tray-empty">Files here won't be touched — "Use this folder" sets it as the destination.</span>`;
+            const useBtn = $id("browse-use");
+            if (useBtn) useBtn.textContent = `Use “${Path.basename(currentPath) || currentPath}”`;
+            return;
+        }
         const scanBtn = $id("browse-scan");
         const n = selectedPaths.size;
         if (tray) {
@@ -1244,6 +1283,12 @@ async function showBrowseDialog(startPath) {
             if (clr) clr.addEventListener("click", () => { selectedPaths.clear(); renderList(); });
         }
         if (scanBtn) scanBtn.textContent = n > 0 ? `Scan ${n} Selected` : "Scan Current Folder";
+    }
+
+    function commitFolderPick() {
+        const dir = currentPath;
+        R.closeModal();
+        if (typeof opts.onPick === "function" && dir) opts.onPick(dir);
     }
 
     async function doScanSelection() {
@@ -1372,7 +1417,6 @@ async function doMatch() {
                 files: filesToMatch,
                 datasource: elSource.value,
                 template: elTemplate.value,
-                include_adult: elIncludeAdult.checked,
                     output_dir: elDest?.value.trim() || null,
             }),
         });
@@ -1461,12 +1505,18 @@ async function doRename() {
             renderGutter();
             btnMatch.disabled = true;
             btnRename.disabled = true;
+            updateTemplatePreview();   // panes cleared — drop the sampled filename
         }
     } catch (err) {
         statusDone("Rename failed: " + err.message);
     } finally {
         clearInterval(ticker);
-        btnRename.disabled = false;
+        // Recompute the button from current state rather than forcing it
+        // enabled: after a successful rename the panes are cleared, so Rename
+        // must go back to disabled/"Rename"; after a failure the selection is
+        // intact, so it re-enables with its count. (The old unconditional
+        // re-enable left a stale "Rename N files" on empty panes.)
+        updateFooter();
     }
 }
 
@@ -1965,6 +2015,19 @@ async function showSettings(scrollTo) {
         ? `<span class="settings-badge ok">● Active</span>`
         : `<span class="settings-badge missing">○ Not set</span>`;
 
+    // Right-hand affordance in a key's label row: a Remove button when the key
+    // is stored in keys.env (UI-owned), a "managed in the environment" note
+    // when it's active but came from Docker compose / systemd, nothing when
+    // it isn't set. `which` is "tmdb" | "omdb".
+    const keyAction = (which, isSet, removable) => {
+        if (!isSet) return "";
+        if (removable) {
+            return `<button class="settings-remove" data-remove-key="${which}" title="Remove this saved key">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/></svg>Remove</button>`;
+        }
+        return `<span class="settings-envnote">set in the environment — manage it there</span>`;
+    };
+
     const th = currentTheme();
     const swatch = (id, label) =>
         `<div class="theme-swatch ${th === id ? "active" : ""}" data-theme="${id}">
@@ -1991,7 +2054,7 @@ async function showSettings(scrollTo) {
 
         <div class="settings-row">
             <div class="settings-label">
-                <span>TMDb API key</span>${badge(tmdbSet)}
+                <span>TMDb API key</span>${badge(tmdbSet)}${keyAction("tmdb", tmdbSet, current.tmdb_key_removable)}
             </div>
             <p class="settings-hint">
                 Required for TV + movie metadata.
@@ -2008,10 +2071,10 @@ async function showSettings(scrollTo) {
 
         <div class="settings-row">
             <div class="settings-label">
-                <span>OMDb API key</span>${badge(omdbSet)}
+                <span>OMDb API key</span>${badge(omdbSet)}${keyAction("omdb", omdbSet, current.omdb_key_removable)}
             </div>
             <p class="settings-hint">
-                Enables IMDb data + adult-title fallback search. Free: 1,000 req/day.
+                Enables IMDb data + niche-title fallback search. Free: 1,000 req/day.
                 Get a free key at
                 <a href="https://www.omdbapi.com/apikey.aspx" target="_blank" rel="noopener noreferrer">omdbapi.com</a>.
             </p>
@@ -2084,6 +2147,34 @@ async function showSettings(scrollTo) {
     // Theme picker — applies instantly and persists.
     modalBody.querySelectorAll(".theme-swatch").forEach(sw => {
         sw.addEventListener("click", () => applyTheme(sw.dataset.theme));
+    });
+
+    // Remove a saved key: confirm → POST the explicit clear flag → re-render
+    // Settings so the badge/affordance update. Blank fields never clear a key;
+    // only this does.
+    modalBody.querySelectorAll(".settings-remove").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const which = btn.dataset.removeKey;   // "tmdb" | "omdb"
+            const name = which === "tmdb" ? "TMDb" : "OMDb";
+            const consequence = which === "tmdb"
+                ? "TV + movie metadata lookup will be disabled until you add a new one."
+                : "IMDb fallback search will be disabled until you add a new one.";
+            if (!await confirmDialog(`Remove your ${name} key? ${consequence}`,
+                                     { okText: "Remove key", danger: true })) return;
+            try {
+                const body = which === "tmdb" ? { clear_tmdb: true } : { clear_omdb: true };
+                const result = await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
+                // The TMDb key gates the first-run banner — resurface it if the
+                // key that was just removed leaves no TMDb source.
+                if (which === "tmdb" && !result.tmdb_enabled) keyBanner.classList.remove("hidden");
+                status(`${name} key removed`);
+                setTimeout(() => statusHide(), 1500);
+                showSettings();   // re-render: badge → Not set, Remove gone
+            } catch (err) {
+                status(`Couldn't remove the ${name} key: ${err.message}`);
+                setTimeout(() => statusHide(), 2500);
+            }
+        });
     });
 
     // Template tokens: click-to-copy with inline confirmation (the main
@@ -2838,8 +2929,7 @@ window.R = {
             if (t === "movie" && ds === "tvmaze") ds = "tmdb";
             if (t === "tv" && ds === "omdb") ds = "tmdb";
 
-            let url = `/api/search?q=${encodeURIComponent(q || "x")}&type=${t}&datasource=${ds}`
-                    + `&include_adult=${elIncludeAdult.checked}`;
+            let url = `/api/search?q=${encodeURIComponent(q || "x")}&type=${t}&datasource=${ds}`;
             const y = parseInt(yEl.value, 10);
             if (y) url += `&year=${y}`;
             if (imdb) url += `&imdb_id=${encodeURIComponent(imdb)}`;
@@ -2941,8 +3031,7 @@ window.R = {
                     files: filesToMatch,
                     datasource: elSource.value,
                     template: elTemplate.value,
-                    include_adult: elIncludeAdult.checked,
-                    output_dir: elDest?.value.trim() || null,
+                        output_dir: elDest?.value.trim() || null,
                     selected_movie_id: String(movieId),
                     selected_movie_source: movieSource,
                 }),
@@ -3004,8 +3093,7 @@ window.R = {
                     files: filesToMatch,
                     datasource: elSource.value,
                     template: elTemplate.value,
-                    include_adult: elIncludeAdult.checked,
-                    output_dir: elDest?.value.trim() || null,
+                        output_dir: elDest?.value.trim() || null,
                     selected_show_id: showId,
                     selected_show_name: showName,
                 }),
@@ -3107,13 +3195,14 @@ window.R = {
                 else newSelected.add(i);
             });
             selectedSet = newSelected;
-            
+
             renderLeft();
             renderRight();
             renderGutter();
+            updateTemplatePreview();   // first row may have changed — re-sample it
         }
     },
-    
+
     dragEnd(e) {
         e.target.classList.remove("dragging");
         document.querySelectorAll(".drag-over").forEach(el => el.classList.remove("drag-over"));
@@ -3335,15 +3424,81 @@ $id("bulk-clear-unmatched")?.addEventListener("click", () => {
 });
 
 /* ─── Live template preview (item 6) ──────────────────────────── */
+/* Media-appropriate placeholder per preset kind, so a no-files preview reads
+   as what it actually produces — "Movie Name (2024)" for Film, not the TV-ish
+   "Show Name". Flat reuses TV (it's a TV rename in place). */
+const PRESET_SAMPLE = {
+    TV:    { clean_name: "Series Name", year: 2024, season: 1, episode: 1, title: "Pilot", media_type: "series" },
+    Film:  { clean_name: "Movie Name",  year: 2024, media_type: "movie" },
+    Anime: { clean_name: "Anime Name",  year: 2024, absolute: 1, title: "The Journey Begins", media_type: "series" },
+    Flat:  { clean_name: "Series Name", year: 2024, season: 1, episode: 1, title: "Pilot", media_type: "series" },
+    Music: { artist: "Artist", album: "Album", track: 1, title: "Song Title", media_type: "music" },
+};
+
+/* Best-effort kind from a custom template's tokens (for the badge + sample when
+   the template matches no named preset). */
+function inferKind(tpl) {
+    if (/\{artist\}|\{album\}|\{track\}/.test(tpl)) return "Music";
+    if (/\{absolute\}/.test(tpl)) return "Anime";
+    if (/\{s00e00\}|\{season\}|\{s\}|\{e\}|\{title\}/.test(tpl)) return "TV";
+    if (/\{year\}|\{y\}/.test(tpl)) return "Film";
+    return null;
+}
+
+/* Which built-in preset buttons exist (direct children only — custom presets
+   live in #custom-presets and carry their template in a closure, not a
+   data-template attribute). */
+function builtinPresetButtons() {
+    return [...document.querySelectorAll(".template-presets > .preset-btn[data-template]")];
+}
+
+/* Highlight the preset (built-in OR custom) matching the current template, and
+   return the label to badge the preview with. Runs on every template change. */
+function highlightActivePreset() {
+    const cur = elTemplate.value.trim();
+    let label = null;
+    builtinPresetButtons().forEach(b => {
+        const on = b.dataset.template === cur;
+        b.classList.toggle("active", on);
+        if (on) label = b.textContent.trim();
+    });
+    const custom = (typeof loadCustomPresets === "function") ? loadCustomPresets() : [];
+    const customBtns = document.querySelectorAll("#custom-presets .preset-btn");
+    custom.forEach((p, i) => {
+        const on = p.template === cur;
+        customBtns[i]?.classList.toggle("active", on);
+        if (on && label === null) label = p.label;
+    });
+    return label;
+}
+
+/* {label, sample} for the preview: the matched preset's kind + placeholder, or
+   an inferred kind for a custom template, or "Custom" with no override. */
+function templateKindInfo() {
+    const cur = elTemplate.value.trim();
+    const btn = builtinPresetButtons().find(b => b.dataset.template === cur);
+    if (btn) { const k = btn.textContent.trim(); return { label: k, sample: PRESET_SAMPLE[k] || null }; }
+    const inferred = inferKind(cur);
+    // A saved custom preset shows its own name (more specific); an unsaved
+    // custom shows the inferred media kind so the badge matches the preview;
+    // otherwise just "Custom".
+    const cust = ((typeof loadCustomPresets === "function") ? loadCustomPresets() : []).find(p => p.template === cur);
+    const label = cust ? cust.label : (inferred || "Custom");
+    return { label, sample: inferred ? PRESET_SAMPLE[inferred] : null };
+}
+
 let _previewTimer = null;
 function updateTemplatePreview() {
     const el = $id("template-preview");
     if (!el) return;
+    highlightActivePreset();
     const tpl = elTemplate.value.trim();
     if (!tpl) { el.textContent = ""; return; }
-    // Sample = first selected file, else first scanned file, else empty.
+    const info = templateKindInfo();
+    // A real scanned file always wins; otherwise a media-appropriate sample so
+    // the placeholder matches the chosen preset.
     const idx = scannedFiles.findIndex((_, i) => selectedSet.has(i));
-    const sample = scannedFiles[idx] || scannedFiles[0] || {};
+    const sample = scannedFiles[idx] || scannedFiles[0] || info.sample || {};
     clearTimeout(_previewTimer);
     _previewTimer = setTimeout(async () => {
         try {
@@ -3351,8 +3506,15 @@ function updateTemplatePreview() {
                 method: "POST",
                 body: JSON.stringify({ template: tpl, sample }),
             });
-            el.textContent = data.preview ? "→ " + data.preview : "";
             el.classList.remove("preview-error");
+            el.textContent = "";
+            const badge = document.createElement("span");
+            badge.className = "preview-kind";
+            badge.textContent = info.label;                 // fixed set / user label — set as text, never markup
+            const path = document.createElement("span");
+            path.className = "preview-path";
+            path.textContent = data.preview ? "→ " + data.preview : "";
+            el.append(badge, path);
         } catch (err) {
             el.textContent = "⚠ " + err.message;
             el.classList.add("preview-error");
@@ -3360,6 +3522,30 @@ function updateTemplatePreview() {
     }, 250);
 }
 elTemplate.addEventListener("input", () => { persistPrefs(); updateTemplatePreview(); });
+
+/* Let a filename be mouse-selected even though its row is draggable: pressing
+   on .row-text disables that row's drag just for this gesture, so dragging
+   across the name SELECTS it; releasing restores drag so reorder/remap still
+   works from the rest of the row (checkbox, icon, tags, padding). Delegated on
+   the persistent list containers so it survives the frequent innerHTML
+   re-renders. Confirmed the only reliable way to select text in a draggable
+   row — the drag otherwise always wins. */
+let _selDragRow = null;
+function armRowTextSelect(e) {
+    if (e.button !== 0) return;                       // left button only
+    const txt = e.target.closest(".row-text");
+    if (!txt) return;
+    const row = txt.closest(".row-item");
+    if (row && row.getAttribute("draggable") === "true") {
+        row.setAttribute("draggable", "false");
+        _selDragRow = row;
+    }
+}
+leftList.addEventListener("mousedown", armRowTextSelect);
+rightList.addEventListener("mousedown", armRowTextSelect);
+document.addEventListener("mouseup", () => {
+    if (_selDragRow) { _selDragRow.setAttribute("draggable", "true"); _selDragRow = null; }
+});
 
 /* ─── Keyboard shortcuts ──────────────────────────────────── */
 document.addEventListener("keydown", e => {
@@ -3369,13 +3555,28 @@ document.addEventListener("keydown", e => {
         R.startInlineEdit(focusedIdx);
         return;
     }
+    // Ctrl/Cmd+C: copy the focused row's path — but only when the user isn't
+    // typing and hasn't selected text (a real selection copies natively).
+    if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C")) {
+        const inEditable = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
+        const hasSelection = !!(window.getSelection && window.getSelection().toString().trim());
+        if (!inEditable && !hasSelection && focusedIdx !== null && scannedFiles[focusedIdx]) {
+            e.preventDefault();
+            R.copyPath(scannedFiles[focusedIdx].path);
+        }
+        return;
+    }
     // Delete: remove selected files (skip when editing inline)
     if (e.key === "Delete" && scannedFiles.length > 0 && !document.querySelector(".row-edit-input")) {
         e.preventDefault();
         removeSelected();
     }
-    // Ctrl+A: select all
-    if (e.key === "a" && e.ctrlKey && scannedFiles.length > 0 && !document.querySelector(".row-edit-input")) {
+    // Ctrl+A: select all FILES — but not while a dialog is open (there the
+    // browser's native select-all should work on the dialog's text) or while
+    // editing inline.
+    if (e.key === "a" && e.ctrlKey && scannedFiles.length > 0
+            && modalOverlay.classList.contains("hidden")
+            && !document.querySelector(".row-edit-input")) {
         e.preventDefault();
         selectedSet = new Set(scannedFiles.map((_, i) => i));
         renderLeft();
@@ -3423,6 +3624,7 @@ function removeSingleFile(idx) {
     leftCount.textContent = scannedFiles.length;
     btnMatch.disabled = scannedFiles.length === 0;
     updateFooter();
+    updateTemplatePreview();   // preview samples scannedFiles[0] — re-sync after removal
 }
 
 function removeSelected() {
@@ -3440,6 +3642,7 @@ function removeSelected() {
     leftCount.textContent = scannedFiles.length;
     btnMatch.disabled = scannedFiles.length === 0;
     updateFooter();
+    updateTemplatePreview();   // preview samples scannedFiles[0] — re-sync after removal
 }
 
 /* ─── Modal ───────────────────────────────────────────────── */

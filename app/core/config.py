@@ -153,3 +153,27 @@ def read_config_status() -> dict[str, bool]:
     Never returns the actual key values.
     """
     return {key: bool(os.environ.get(key)) for key in MANAGED_KEYS}
+
+
+def read_file_keys() -> dict[str, bool]:
+    """Which managed keys are stored in keys.env (i.e. UI-owned, so the
+    Settings "Remove" can actually delete them). A key that is active in
+    os.environ but NOT in the file came from the environment (Docker compose,
+    systemd, a shell export) — the UI can't persistently remove those; they
+    are managed wherever they were set. Never returns values."""
+    cfg = config_file()
+    present = {key: False for key in MANAGED_KEYS}
+    if not cfg.is_file():
+        return present
+    try:
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            if k in present and v.strip():
+                present[k] = True
+    except OSError:
+        pass
+    return present

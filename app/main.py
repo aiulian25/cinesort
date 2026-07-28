@@ -41,7 +41,7 @@ from app.core.matcher import (
 from app.core.formatter import apply_template, build_new_path, TEMPLATES, sanitize_filename
 from app.core.renamer import execute_rename, RenameAction, RenameResult
 from app.core.history import history, HistoryEntry, _prune_empty_dirs, _common_ancestor
-from app.core.config import load_config, save_config, read_config_status, config_file
+from app.core.config import load_config, save_config, read_config_status, read_file_keys, config_file
 from app.core.watches import load_watches, save_watches
 from app.api.tmdb import TMDbClient
 from app.api.tvmaze import TVMazeClient
@@ -58,7 +58,7 @@ import uuid
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.4.1")
+app = FastAPI(title="CineSort", version="1.4.2")
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -174,7 +174,6 @@ class MatchRequest(BaseModel):
     # instead of next to the source ("sort Downloads into the library").
     # None/empty = today's in-place behavior.
     output_dir: Optional[str] = None
-    include_adult: bool = False  # Pass through to TMDB; OMDb never filters adult content
 
     @field_validator("datasource")
     @classmethod
@@ -222,11 +221,16 @@ class RenameRequest(BaseModel):
 
 
 class SettingsRequest(BaseModel):
-    """Keys sent by the Settings modal. Empty string = keep current key unchanged
-    (for the language field, empty = clear back to TMDb's default English)."""
+    """Keys sent by the Settings modal. Empty string = keep current key
+    unchanged (blank = keep); a non-empty value replaces it. Removal is
+    explicit via clear_tmdb/clear_omdb — never via a blank field, so a key can
+    never be wiped by accident. (For the language field, empty = clear back to
+    TMDb's default English.)"""
     tmdb_key: str = ""
     omdb_key: str = ""
     tmdb_language: str = ""
+    clear_tmdb: bool = False   # explicit "Remove key" from the Settings UI
+    clear_omdb: bool = False
 
     @field_validator("tmdb_key", "omdb_key")
     @classmethod
@@ -519,7 +523,6 @@ async def search_metadata(
     type: str = Query("tv", pattern="^(tv|movie)$"),
     datasource: str = Query("tmdb", pattern="^(tmdb|tvmaze|omdb)$"),
     year: Optional[int] = None,
-    include_adult: bool = Query(False),
     # Plain None (not Query(None)): the Query sentinel is truthy when this
     # coroutine is called directly (tests, future CLI), which would wrongly
     # take the imdb_id branch. FastAPI treats both identically over HTTP;
@@ -560,7 +563,7 @@ async def search_metadata(
         if type == "tv":
             raw = await tmdb.search_tv(q, year)
         else:
-            raw = await tmdb.search_movie(q, year, include_adult=include_adult)
+            raw = await tmdb.search_movie(q, year)
         for r in raw[:10]:
             results.append({
                 "id": r.id,
@@ -1406,8 +1409,8 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
 
             if not exact_pick and tmdb.enabled:
                 tmdb_results, errs = await _cascade_search(
-                    lambda q, y: cached(("tmdb", "search_movie", q, y, req.include_adult),
-                                        lambda: tmdb.search_movie(q, y, include_adult=req.include_adult)),
+                    lambda q, y: cached(("tmdb", "search_movie", q, y),
+                                        lambda: tmdb.search_movie(q, y)),
                     group_name, year,
                 )
                 if errs:
@@ -2100,32 +2103,33 @@ async def preview_template(req: PreviewRequest):
     return {"preview": preview}
 
 
-# Display metadata for each rename action, served via /api/actions so the UI
+# Display label for each rename action, served via /api/actions so the UI
 # dropdown can never drift from the RenameAction enum again (KEEPLINK was fully
 # implemented but unreachable for months because the list was hardcoded in
-# index.html). Dict order = display order in the UI.
-ACTION_META = {
-    RenameAction.RENAME:   ("Rename (in-place)", "Rename in place — files stay in their current folders."),
-    RenameAction.TEST:     ("Test (Dry Run)",    "Dry run — nothing changes on disk."),
-    RenameAction.MOVE:     ("Move",              "Move relocates files into new folders — they leave this location."),
-    RenameAction.KEEPLINK: ("Move + Keep Link",  "Moves the file and leaves a symlink at the old path — torrents keep seeding. Not for SMB/FAT."),
-    RenameAction.COPY:     ("Copy",              "Copy keeps originals and creates renamed copies."),
-    RenameAction.HARDLINK: ("Hard Link",         "Hard link — same file, second name. Same filesystem only."),
-    RenameAction.SYMLINK:  ("Symlink",           "Symlink points back to the original. Not for SMB/FAT."),
+# index.html). Dict order = display order in the UI. (The per-action
+# explanation strings were removed — the labels are self-explanatory.)
+ACTION_LABELS = {
+    RenameAction.RENAME:   "Rename (in-place)",
+    RenameAction.TEST:     "Test (Dry Run)",
+    RenameAction.MOVE:     "Move",
+    RenameAction.KEEPLINK: "Move + Keep Link",
+    RenameAction.COPY:     "Copy",
+    RenameAction.HARDLINK: "Hard Link",
+    RenameAction.SYMLINK:  "Symlink",
 }
 
 
 @app.get("/api/actions")
 async def get_actions():
     items = [
-        {"value": a.value, "label": label, "hint": hint}
-        for a, (label, hint) in ACTION_META.items()
+        {"value": a.value, "label": label}
+        for a, label in ACTION_LABELS.items()
     ]
-    # Safety net: any enum member missing from ACTION_META still gets listed,
+    # Safety net: any enum member missing from ACTION_LABELS still gets listed,
     # so a future action can never silently vanish from the UI again.
     listed = {i["value"] for i in items}
     items.extend(
-        {"value": a.value, "label": a.value.title(), "hint": ""}
+        {"value": a.value, "label": a.value.title()}
         for a in RenameAction if a.value not in listed
     )
     return items
@@ -2287,9 +2291,16 @@ async def get_settings():
     so the UI can show where to edit manually if needed.
     """
     status = read_config_status()
+    in_file = read_file_keys()
     return {
         "tmdb_key_set": status.get("TMDB_API_KEY", False),
         "omdb_key_set": status.get("OMDB_API_KEY", False),
+        # Removable = stored in keys.env (UI-owned). A key that's active but not
+        # in the file came from the environment (Docker compose / systemd) — the
+        # UI shows a "managed there" hint instead of a Remove button, since a
+        # click couldn't persistently delete it.
+        "tmdb_key_removable": in_file.get("TMDB_API_KEY", False),
+        "omdb_key_removable": in_file.get("OMDB_API_KEY", False),
         # Let the UI show where the file lives (helpful for power users)
         "config_file": str(config_file()),
         # Indicate whether each client is actually usable right now
@@ -2317,15 +2328,17 @@ async def post_settings(req: SettingsRequest):
     global tmdb, omdb
 
     updates: dict[str, str] = {}
-    if req.tmdb_key != "":
+    # Removal is explicit (the "Remove" button sends clear_tmdb/clear_omdb);
+    # a blank field means "keep", never "clear". A non-empty value replaces.
+    if req.clear_tmdb:
+        updates["TMDB_API_KEY"] = ""
+    elif req.tmdb_key != "":
         updates["TMDB_API_KEY"] = req.tmdb_key
-    elif req.tmdb_key == "" and "TMDB_API_KEY" in (req.model_fields_set or set()):
-        updates["TMDB_API_KEY"] = ""   # explicit clear
 
-    if req.omdb_key != "":
-        updates["OMDB_API_KEY"] = req.omdb_key
-    elif req.omdb_key == "" and "OMDB_API_KEY" in (req.model_fields_set or set()):
+    if req.clear_omdb:
         updates["OMDB_API_KEY"] = ""
+    elif req.omdb_key != "":
+        updates["OMDB_API_KEY"] = req.omdb_key
 
     # Language: unlike the keys (empty = keep, they're write-only password
     # fields), the language field is visible and prefilled — empty means

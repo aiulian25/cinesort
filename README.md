@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.4.1-green.svg)
+![Version](https://img.shields.io/badge/version-1.4.2-green.svg)
 
 ---
 
@@ -48,7 +48,6 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 - **Smart fallback search** — Retries with the year dropped, then progressively trimmed titles, so noisy filenames still match
 - **Anime / absolute numbering** — Cumulative absolute episode numbers are computed and matched
 - **Year disambiguation** — Auto-resolves same-named shows when the filename carries a year (skips an unnecessary prompt)
-- **Adult-title support** — Optional Adult toggle unlocks TMDB results filtered by default; OMDb never filters
 - **Manual rename** — FileBot-style inline edit when auto-match fails: double-click, F2, or right-click → Edit
 
 ### UI / UX
@@ -102,20 +101,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.4.1_amd64.deb # arm64: cinesort_1.4.1_arm64.deb
+sudo dpkg -i cinesort_1.4.2_amd64.deb # arm64: cinesort_1.4.2_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.4.1.x86_64.rpm # arm64: cinesort-1.4.1.aarch64.rpm
+sudo dnf install ./cinesort-1.4.2.x86_64.rpm # arm64: cinesort-1.4.2.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.4.1.AppImage # arm64: CineSort-1.4.1-arm64.AppImage
-./CineSort-1.4.1.AppImage
+chmod +x CineSort-1.4.2.AppImage # arm64: CineSort-1.4.2-arm64.AppImage
+./CineSort-1.4.2.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -130,8 +129,8 @@ On first launch the app **automatically** installs itself into your application 
 | Source | Key required? | What it unlocks |
 |--------|:---:|---|
 | **TVMaze** | No | Free TV episode data, no limits |
-| **TMDb** | Optional | Movies + TV; your own key unlocks full API access. Adult titles require the Adult toggle. |
-| **OMDb** | Optional | IMDb data; automatically used as fallback when TMDb returns no results. Unlocks niche and adult titles without the Adult toggle. |
+| **TMDb** | Optional | Movies + TV; your own key unlocks full API access. |
+| **OMDb** | Optional | IMDb data; automatically used as fallback when TMDb returns no results. Unlocks niche titles TMDb may miss. |
 
 ### Getting a TMDb key (free)
 
@@ -272,9 +271,8 @@ volumes:
 - Select a **Source** from the toolbar dropdown:
   - **TMDb** — best for mainstream movies and TV (default)
   - **TVMaze** — alternative TV source, completely free
-  - **OMDb (IMDb)** — IMDb data; ideal for niche or adult titles
+  - **OMDb (IMDb)** — IMDb data; ideal for niche titles
 - Audio files (`.mp3`, `.flac`, …) always match via **MusicBrainz** regardless of the selected Source — a mixed video + music batch matches in one click (music uses its own `{artist}/{album}/{track} - {title}` naming unless your template contains music tokens)
-- Enable **Adult** if you need titles that TMDb filters by default
 - Click **Match**
 - If multiple shows are found you will be asked to choose one
 
@@ -378,10 +376,6 @@ v1.2.5+ AppImages detect an installed deb and no longer create a shadowing entry
 
 OMDb requires a key. Click **Settings** and enter your key, or check that `OMDB_API_KEY` is set in `docker-compose.yml`.
 
-### Adult titles not appearing
-
-Enable the **Adult** checkbox in the toolbar before clicking Match. This passes `include_adult=true` to the TMDb search API. If the title still doesn't appear, switch Source to **OMDb** — OMDb does not filter adult content regardless of the toggle.
-
 ### Permission denied when renaming
 
 ```bash
@@ -416,9 +410,9 @@ docker inspect cinesort | grep Health
 
 | Source | Free | Key | Rate limit | Notes |
 |--------|:----:|:---:|-----------|-------|
-| **TMDb** | | Optional | ~50 req/s | Mainstream movies & TV; adult flag available |
+| **TMDb** | | Optional | ~50 req/s | Mainstream movies & TV |
 | **TVMaze** | | None | Reasonable use | TV only |
-| **OMDb** | | Required | 1,000/day (free tier) | IMDb data; no adult filtering |
+| **OMDb** | | Required | 1,000/day (free tier) | IMDb data |
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
 
@@ -537,8 +531,18 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## Changelog
 
+### v1.4.2
+- **Wayland drag-and-drop fixed** — on a Wayland desktop session, dropping files from the file manager did nothing: the app ran under XWayland, and the compositor silently discarded the cross-protocol drag before it ever reached the window. Desktop builds now use the native Wayland backend when the session is Wayland (X11 sessions are unchanged). Escape hatch: `CINESORT_OZONE=x11` forces the old behavior.
+- **Remove saved API keys** — each key stored on this machine now shows a **Remove** button beside its status in Settings, so a key can be deleted and replaced (blank = keep, type = change, Remove = delete). Keys provided by the environment (Docker compose) show a note instead — manage those where they're set. Fixes a latent issue where a saved key could only be overwritten, never cleared.
+- **Deleting files fully clears them** — removing files from the list (context menu, Delete key) now also clears the template-preview sample, so a deleted title no longer lingers in the preview until "Start Over".
+- **Browseable destination** — the Destination field has a **Browse** button to pick a target folder instead of typing a path (leave empty to organize in place).
+- **Rename moved up** — the Rename button now sits beside Match at the top; the footer and the per-action explanatory line are gone, freeing vertical space.
+- **Copy any text** — filenames and results are now selectable with the mouse and copyable with Ctrl/Cmd+C, even though rows stay draggable.
+- **Clearer presets** — the live preview badges which preset/kind is active (Film vs TV, etc.), so the output format is unambiguous before you rename.
+- **Adult content toggle removed** — matching is unrestricted; no toggle to tick.
+
 ### v1.4.1
-- **Compact interface** — the chrome above the file list shrank from 335 px to ~217 px (controls 36→28 px, rows 42→30 px, tighter type and spacing): roughly **twice the files on screen** at every window size. The Insert-token palette moved to a click-to-copy **Template tokens** reference in Settings (now also documenting the music tokens); a small **tokens** link beside the template field opens it. Presets and the live preview share one row, and the Adult toggle sits inline in the Source label.
+- **Compact interface** — the chrome above the file list shrank from 335 px to ~217 px (controls 36→28 px, rows 42→30 px, tighter type and spacing): roughly **twice the files on screen** at every window size. The Insert-token palette moved to a click-to-copy **Template tokens** reference in Settings (now also documenting the music tokens); a small **tokens** link beside the template field opens it. Presets and the live preview share one row.
 - **Native desktop layout** — on deb/rpm/AppImage the app now runs edge-to-edge inside its window with hairline separators, instead of web-page cards floating in a gutter ("border within a border"). Docker/browser keeps the card look — a browser tab provides no frame of its own.
 - **Check for updates button** — the Settings update card can check on demand instead of waiting out the once-per-day window. Outcomes are honest: update found, up to date ("Checked just now"), or couldn't reach GitHub. A 30 s floor prevents API hammering, and deployments with `CINESORT_UPDATE_CHECK=0` stay fully offline — the button says so rather than sneaking a request.
 - README screenshots recaptured on the new interface.

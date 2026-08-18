@@ -325,12 +325,17 @@ ipcMain.handle("update:install", async () => {
 ipcMain.handle("update:restart", () => {
     if (!pendingRestart) return { ok: false, error: "No update awaiting a restart." };
     if (pendingRestart.mode === "spawn") {
+        // Extract-and-run only where FUSE2 is unavailable (same policy as the
+        // .desktop entry). Drop an inherited flag so a FUSE-capable system
+        // isn't stuck extracting forever just because THIS instance was
+        // launched that way.
+        const env = { ...process.env };
+        if (hasFuse2()) delete env.APPIMAGE_EXTRACT_AND_RUN;
+        else env.APPIMAGE_EXTRACT_AND_RUN = "1";
         spawn(pendingRestart.target, [], {
             detached: true,
             stdio: "ignore",
-            // extract-and-run works even where FUSE2 is unavailable
-            // (same reason the .desktop entry sets it).
-            env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: "1" },
+            env,
         }).unref();
     } else {
         app.relaunch();   // re-executes /opt/CineSort/cinesort — now the new build
@@ -520,6 +525,38 @@ function probeVenv(pythonPath) {
 }
 
 /**
+ * probeVenv, but cached across launches. The probe spawns Python and imports
+ * the heavy C extensions — ~0.2 s on a warm NVMe, seconds on a cold HDD — and
+ * uvicorn is about to pay the exact same import cost again, so re-proving a
+ * venv that already passed is pure startup tax. Cache the success keyed by
+ * the resolved interpreter (path + mtime) and the app version (the bundled
+ * venv only ever changes with the app). Stored in userData because
+ * resources/ is root-owned on deb/rpm and read-only inside an AppImage mount.
+ */
+function probeVenvCached(pythonPath) {
+    let identity;
+    try {
+        const real = fs.realpathSync(pythonPath);
+        identity = { real, mtimeMs: fs.statSync(real).mtimeMs, appVersion: app.getVersion() };
+    } catch {
+        return false;
+    }
+    const marker = path.join(app.getPath("userData"), "venv-probe-ok.json");
+    try {
+        const cached = JSON.parse(fs.readFileSync(marker, "utf8"));
+        if (cached.real === identity.real &&
+            cached.mtimeMs === identity.mtimeMs &&
+            cached.appVersion === identity.appVersion) return true;
+    } catch {}
+    if (!probeVenv(pythonPath)) return false;
+    try {
+        fs.mkdirSync(path.dirname(marker), { recursive: true });
+        fs.writeFileSync(marker, JSON.stringify(identity));
+    } catch {}
+    return true;
+}
+
+/**
  * Locate or repair the Python interpreter to use.
  *
  * Strategy (in order):
@@ -545,9 +582,10 @@ async function findOrCreatePython() {
     const venvPython = path.join(venvDir, "bin", "python3");
 
     // ── Fast path: bundled venv symlink is valid AND actually runs ────────────
+    // (probe cached across launches — see probeVenvCached)
     try {
         const real = fs.realpathSync(venvPython);
-        if (fs.existsSync(real) && probeVenv(venvPython)) {
+        if (fs.existsSync(real) && probeVenvCached(venvPython)) {
             console.log(`[main] Bundled venv OK: ${real}`);
             return { python: venvPython, firstRun: false };
         }
@@ -681,6 +719,9 @@ function pushPyLog(chunk) {
 }
 
 let quitting = false;       // set on before-quit: an exiting backend is then expected
+let backendUp = false;      // false until the first waitForServer succeeds: a backend
+                            // dying during startup belongs to the startup error
+                            // dialog, not the crash-recovery restart
 let currentPython = null;   // interpreter in use — needed to restart the backend
 let lastCrashAt = 0;        // Date.now() of the previous unexpected backend exit
 let recovering = false;     // a restart is in flight; don't stack a second one
@@ -693,7 +734,7 @@ let recovering = false;     // a restart is in flight; don't stack a second one
  * offer Relaunch/Quit instead of leaving a dead UI.
  */
 async function handleBackendExit() {
-    if (quitting || !mainWindow) return;   // normal shutdown paths
+    if (quitting || !mainWindow || !backendUp) return;   // normal shutdown / still starting
     if (recovering) return;                // in-flight recovery surfaces the outcome
     recovering = true;
     try {
@@ -790,12 +831,33 @@ function waitForServer(timeout = 20000) {
                 if (Date.now() - start > timeout) {
                     reject(new Error("Python server did not start in time"));
                 } else {
-                    setTimeout(check, 300);
+                    setTimeout(check, 100);
                 }
             });
         };
         check();
     });
+}
+
+/**
+ * Whether libfuse2 is available. With FUSE the AppImage runtime mounts the
+ * squashfs — effectively instant. Without it (Ubuntu 22.04+ default) the only
+ * way to launch is APPIMAGE_EXTRACT_AND_RUN=1, which unpacks the whole
+ * ~125 MB image to /tmp on EVERY launch — a multi-second startup tax that
+ * FUSE-capable systems should never pay. So: force extraction only where
+ * mounting genuinely can't work.
+ */
+function hasFuse2() {
+    try {
+        return execFileSync("ldconfig", ["-p"], { encoding: "utf8" }).includes("libfuse.so.2");
+    } catch {
+        return [
+            "/usr/lib/x86_64-linux-gnu/libfuse.so.2",
+            "/usr/lib/aarch64-linux-gnu/libfuse.so.2",
+            "/usr/lib64/libfuse.so.2",
+            "/usr/lib/libfuse.so.2",
+        ].some(p => fs.existsSync(p));
+    }
 }
 
 function installDesktopEntry() {
@@ -887,15 +949,18 @@ function installDesktopEntry() {
             fs.copyFileSync(iconSrc, path.join(iconsDir, "cinesort.png"));
         }
 
-        // Use APPIMAGE_EXTRACT_AND_RUN=1 so the desktop entry always works even
-        // on systems where FUSE 2 mounting is unavailable (Ubuntu 22.04+).
+        // FUSE mounting when available (fast); extract-and-run only when it
+        // isn't (Ubuntu 22.04+ without libfuse2). The entry is rewritten on
+        // every launch, so installing/removing libfuse2 self-corrects on the
+        // next run.
+        const execPrefix = hasFuse2() ? "" : "env APPIMAGE_EXTRACT_AND_RUN=1 ";
         const desktop = [
             "[Desktop Entry]",
             "Version=1.0",
             "Type=Application",
             "Name=CineSort",
             "Comment=Professional media file organizer",
-            `Exec=env APPIMAGE_EXTRACT_AND_RUN=1 ${appImagePath} --no-sandbox %U`,
+            `Exec=${execPrefix}${appImagePath} --no-sandbox %U`,
             "Icon=cinesort",
             "Categories=AudioVideo;Video;Utility;",
             "Terminal=false",
@@ -915,12 +980,58 @@ function installDesktopEntry() {
     }
 }
 
+// Shown the instant the window exists, while the backend is still booting.
+// Colors mirror tokens.css (dark theme) so the handoff to the real UI is
+// seamless. A data: URL — static, inline, no network, no new files.
+const SPLASH_URL = "data:text/html;charset=utf-8," + encodeURIComponent(
+    `<!doctype html><meta charset="utf-8"><title>CineSort</title><style>
+    html,body{height:100%;margin:0;background:#0a0a0b;color:#6d6d76;
+      font:13px system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
+    div{display:flex;flex-direction:column;align-items:center;gap:14px}
+    i{width:22px;height:22px;border:2px solid #26262b;border-top-color:#2563eb;
+      border-radius:50%;animation:s .8s linear infinite}
+    @keyframes s{to{transform:rotate(1turn)}}
+    </style><div><i></i>Starting CineSort…</div>`);
+
 app.whenReady().then(async () => {
     // Set app name for proper window class matching
     app.setName("CineSort");
 
-    // Self-install desktop entry + icon on first launch (AppImage only)
-    installDesktopEntry();
+    // ── Window first, backend second ─────────────────────────────────────────
+    // The window used to be created only after Python was probed, spawned AND
+    // serving — the user stared at nothing for the entire backend boot (plus
+    // the AppImage self-staging copy on first launch). Show the shell with a
+    // splash immediately; the real UI replaces it the moment the server answers.
+    const iconPath = getIconPath();
+    console.log("[main] Icon path:", iconPath);
+    const icon = iconPath ? nativeImage.createFromPath(iconPath) : null;
+
+    mainWindow = new BrowserWindow({
+        width: 1440,
+        height: 920,
+        minWidth: 900,
+        minHeight: 500,
+        title: "CineSort",
+        icon: icon,
+        backgroundColor: "#0a0a0b",
+        autoHideMenuBar: true,
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            preload: path.join(__dirname, "preload.js"),
+        },
+    });
+
+    // Try setting icon again after window creation
+    if (icon && !icon.isEmpty()) {
+        mainWindow.setIcon(icon);
+    }
+
+    mainWindow.loadURL(SPLASH_URL);
+
+    mainWindow.on("closed", () => {
+        mainWindow = null;
+    });
 
     // Resolve a free port BEFORE starting Python so a stale instance holding
     // 47299 can never block this launch.
@@ -931,6 +1042,7 @@ app.whenReady().then(async () => {
     // needed.  Must complete before startPython() is called.
     const { python, firstRun } = await findOrCreatePython();
     if (!python) return;  // dialog shown + app.quit() already called
+    if (!mainWindow) return;  // splash closed by the user — app is quitting
 
     startPython(python);
 
@@ -962,40 +1074,21 @@ app.whenReady().then(async () => {
         return;
     }
 
-    const iconPath = getIconPath();
-    console.log("[main] Icon path:", iconPath);
-    const icon = iconPath ? nativeImage.createFromPath(iconPath) : null;
-
-    mainWindow = new BrowserWindow({
-        width: 1440,
-        height: 920,
-        minWidth: 900,
-        minHeight: 500,
-        title: "CineSort",
-        icon: icon,
-        backgroundColor: "#0a0a0b",
-        autoHideMenuBar: true,
-        webPreferences: {
-            nodeIntegration: false,
-            contextIsolation: true,
-            preload: path.join(__dirname, "preload.js"),
-        },
-    });
-    
-    // Try setting icon again after window creation
-    if (icon && !icon.isEmpty()) {
-        mainWindow.setIcon(icon);
-    }
+    backendUp = true;
+    if (!mainWindow) return;  // splash closed during backend boot
 
     mainWindow.loadURL(`http://127.0.0.1:${PORT}`);
 
-    mainWindow.on("closed", () => {
-        mainWindow = null;
-    });
-
     // Restart-to-finish-update watcher (see checkInstalledVersionChanged).
+    // Registered only now: firing it against the splash page would consume the
+    // once-per-session prompt where no renderer is listening.
     mainWindow.on("focus", checkInstalledVersionChanged);
     setInterval(checkInstalledVersionChanged, 60_000);
+
+    // AppImage self-registration (desktop entry, icons, ~/.local/bin staging).
+    // Synchronous fs work — on first launch it copies the whole AppImage — so
+    // it runs deliberately AFTER the UI is up, off the perceived-startup path.
+    installDesktopEntry();
 });
 
 app.on("window-all-closed", () => {

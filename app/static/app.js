@@ -324,7 +324,16 @@ document.addEventListener("drop", e => {
 });
 
 function handleExternalDrop(e) {
-    const files = Array.from(e.dataTransfer.files || []);
+    let files = Array.from(e.dataTransfer.files || []);
+
+    // Some Chromium builds (notably Linux/Wayland) deliver drops with an empty
+    // `files` list while the same File objects sit in `items` — recover them.
+    if (files.length === 0 && e.dataTransfer.items) {
+        files = Array.from(e.dataTransfer.items)
+            .filter(item => item.kind === "file")
+            .map(item => item.getAsFile())
+            .filter(Boolean);
+    }
 
     // ── Electron: webUtils.getPathForFile gives full filesystem path ──
     if (window.electronAPI && window.electronAPI.getPathForFile && files.length > 0) {
@@ -371,7 +380,12 @@ function handleExternalDrop(e) {
     // ── Fallback: ask user for the folder ──
     if (files.length > 0) {
         showLocateDialog(files.map(f => f.name));
+        return;
     }
+
+    // Nothing usable arrived (Wayland drops can deliver before the drag data
+    // is readable). Never fail silently — silence reads as "the app is broken".
+    statusDone("Couldn't read the dropped files — try again, or use Add Files.");
 }
 
 function showLocateDialog(filenames) {

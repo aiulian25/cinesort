@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.4.2-green.svg)
+![Version](https://img.shields.io/badge/version-1.4.3-green.svg)
 
 ---
 
@@ -101,20 +101,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.4.2_amd64.deb # arm64: cinesort_1.4.2_arm64.deb
+sudo dpkg -i cinesort_1.4.3_amd64.deb # arm64: cinesort_1.4.3_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.4.2.x86_64.rpm # arm64: cinesort-1.4.2.aarch64.rpm
+sudo dnf install ./cinesort-1.4.3.x86_64.rpm # arm64: cinesort-1.4.3.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.4.2.AppImage # arm64: CineSort-1.4.2-arm64.AppImage
-./CineSort-1.4.2.AppImage
+chmod +x CineSort-1.4.3.AppImage # arm64: CineSort-1.4.3-arm64.AppImage
+./CineSort-1.4.3.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -530,6 +530,13 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.4.3
+- **Drag & drop actually works now** — v1.4.2 moved desktop builds to the native Wayland backend, but the bundled Chromium was older than Chromium's Wayland drag-and-drop rewrite: it read the drag data on the UI thread through several compositor roundtrips *before* telling the page a drag had entered, so the drop zone lit up seconds late and a normal-speed drop was discarded with no error. The desktop runtime is now current (Electron 43), which carries that rewrite — dropping files and folders from Nautilus, Dolphin, Nemo or Thunar registers immediately and lands every time. X11 sessions and the `CINESORT_OZONE` escape hatch are unchanged, and this also brings a year and a half of upstream security fixes.
+- **A drop that can't be read now says so** — if the desktop ever hands over a drop with nothing readable in it, you get "Couldn't read the dropped files — try again, or use Add Files" instead of silence that looks like a frozen app. CineSort also recovers the files from a second source the browser engine sometimes uses, so fewer drops fail in the first place.
+- **The window opens straight away** — CineSort used to start its backend first and only then draw anything, so a launch looked like nothing had happened for several seconds. The window now appears immediately with a "Starting CineSort…" splash and switches to the app the moment the backend is ready.
+- **Faster launches after the first** — the startup check that verifies the bundled Python environment is now remembered between launches (re-run automatically after an update, or if the interpreter changes), removing a duplicate cost from every start.
+- **AppImage: no more unpacking on every launch** — the menu entry CineSort installs for itself forced the AppImage to extract its full 125 MB to `/tmp` each time, a workaround only needed on systems without libfuse2 (Ubuntu 22.04+). It's now applied only where it's genuinely required, so systems that can mount the image start much faster. The entry is refreshed on each launch, so installing or removing libfuse2 corrects itself.
 
 ### v1.4.2
 - **Wayland drag-and-drop fixed** — on a Wayland desktop session, dropping files from the file manager did nothing: the app ran under XWayland, and the compositor silently discarded the cross-protocol drag before it ever reached the window. Desktop builds now use the native Wayland backend when the session is Wayland (X11 sessions are unchanged). Escape hatch: `CINESORT_OZONE=x11` forces the old behavior.

@@ -23,8 +23,12 @@ ENV PYTHONUNBUFFERED=1 \
     PUID=1000 \
     PGID=1000
 
-# Install system dependencies
+# Install system dependencies.
+# `upgrade` picks up security fixes released after the base image was cut —
+# without it the image ships whatever CVEs the tag froze in (e.g. the
+# util-linux family), even though Debian has already published the fix.
 RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -37,8 +41,13 @@ WORKDIR /app
 # Copy requirements first for better layer caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies, then drop the packaging tools. setuptools and
+# wheel are build-time only — nothing in the app imports them at runtime — but
+# the base image's copies (and setuptools' vendored jaraco.context) keep
+# showing up as HIGH findings. Removing them is strictly safer than shipping
+# unused vulnerable code.
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip uninstall -y setuptools wheel
 
 # Copy application code
 COPY app/ ./app/

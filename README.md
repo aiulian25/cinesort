@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.4.3-green.svg)
+![Version](https://img.shields.io/badge/version-1.5.0-green.svg)
 
 ---
 
@@ -101,20 +101,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.4.3_amd64.deb # arm64: cinesort_1.4.3_arm64.deb
+sudo dpkg -i cinesort_1.5.0_amd64.deb # arm64: cinesort_1.5.0_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.4.3.x86_64.rpm # arm64: cinesort-1.4.3.aarch64.rpm
+sudo dnf install ./cinesort-1.5.0.x86_64.rpm # arm64: cinesort-1.5.0.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.4.3.AppImage # arm64: CineSort-1.4.3-arm64.AppImage
-./CineSort-1.4.3.AppImage
+chmod +x CineSort-1.5.0.AppImage # arm64: CineSort-1.5.0-arm64.AppImage
+./CineSort-1.5.0.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -221,6 +221,7 @@ Restart the app for changes to take effect when editing the file manually.
 | `CINESORT_PORT` | `8888` | Server port |
 | `CINESORT_DATA_DIR` | `/data` (Docker image) | Where history (`history.json`) and UI-saved API keys (`config/keys.env`) live. The image points it at the `/data` volume so both survive container recreation. Unset on desktop builds (per-user home paths are used). |
 | `CINESORT_BROWSE_ROOTS` | *(none)* | Extra folders the in-app browser may expose, in addition to `/mnt` and `/media` (`:`-separated, e.g. `/srv/tv:/srv/movies`). Only add paths you also mount. Shown as quick-access shortcuts. |
+| `CINESORT_SCOPE_TO_BROWSE_ROOTS` | *(unset)* | Set to `1` to confine **scanning, rename destinations, and watch rules** to the same roots the in-app browser may expose (`/mnt`, `/media`, plus `CINESORT_BROWSE_ROOTS`) — paths outside them are refused (422/403). Off by default because the desktop builds' native picker is meant to reach `$HOME`. Recommended for any Docker instance whose port is published beyond `127.0.0.1`. |
 | `CINESORT_ENABLE_GPU` | *(unset)* | Desktop only: set to `1` to re-enable GPU hardware acceleration (disabled by default on Linux to avoid black-window issues) |
 
 ### Volume Mounts
@@ -494,6 +495,20 @@ volumes:
 | **User** | Non-root (UID configurable via PUID) |
 | **Key storage** | `~/.config/cinesort/keys.env` — mode `0600` |
 | **Health check** | `GET /` every 30 s |
+| **API authentication** | **None** — see the note below |
+
+> **Exposing the Docker port.** The API has no authentication, by design: it is
+> built for a trusted machine or LAN, and the real boundary is the container
+> user's own filesystem permissions (PUID/PGID plus whatever you mount).
+> Anyone who can reach the port can browse and move files inside those mounts.
+> Keep it bound to localhost (`127.0.0.1:8888:8888`) or a trusted network, put
+> it behind your own reverse proxy and auth if it must be reachable, and set
+> `CINESORT_SCOPE_TO_BROWSE_ROOTS=1` to confine scanning, rename destinations
+> and watch rules to `/mnt`, `/media` and your `CINESORT_BROWSE_ROOTS` instead
+> of everywhere the container user can reach.
+>
+> Desktop installs (deb/rpm/AppImage) bind to `127.0.0.1` on a private port and
+> are unaffected.
 
 ---
 
@@ -530,6 +545,16 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.5.0
+- **Match a show or film by its IMDb ID** — pasting a `tt…` ID into Search metadata now works for **series**, not just films. It never could before: IMDb data alone carries no episode list, so a series ID had nowhere to go and the pick was silently dropped. CineSort now translates the ID to the matching TMDb show and runs the normal episode match, so a file named nothing but `tt0903747.mkv` becomes `Breaking Bad - S01E01 - Pilot.mkv`. Needs a TMDb key; without one it says so instead of failing quietly.
+- **A match you pick by hand is now honored, and stays** — choosing an exact title (by IMDb ID, or from the "which one is it?" dialog) used to be refused outright when the filename resembled nothing, and even when it worked, the next **Match** click silently unticked the row so Rename skipped it. Your choice is now treated as a decision rather than a guess: it always applies, keeps its tick through later matching, and shows as high-confidence. The honest score is still there in **View metadata**, so "why this match" never lies to you.
+- **Naming a file by hand ticks it for renaming** — pressing F2 (or the pencil) on a file the confidence gate had unticked left it unticked, so "Manual name set: …" was followed by a Rename that ignored it. Typing a name now counts as consent; cancelling still doesn't.
+- **Fewer wrong matches on long, noisy filenames** — release tags the detector never removed (`Hybrid`, `REMUX`, `HDR10Plus`, `GERMAN.DL`, `VOSTFR`, a trailing `-GROUP`) were being sent to the metadata providers as part of the title. That diluted the score enough to skip the "1987 or 2026?" prompt on remakes and to push good matches under the auto-select threshold. Those tags are now stripped — and carefully: *The Italian Job*, *The French Connection*, *Spider-Man* and *Ant-Man* keep every word of their titles.
+- **Long titles no longer fail at the last step** — a name longer than the filesystem allows previously passed matching, passed **Test (Dry Run) reporting success**, then failed the real rename with a raw `[Errno 36]`. Names are now trimmed to fit when they are built, so the preview shows what will actually be written. The limit is counted in bytes, so Japanese, Chinese and Cyrillic titles are handled correctly, and subtitles that inherit a video's name are trimmed alongside it. If an over-long name still reaches the filesystem, the error says so in plain words.
+- **History records missing files** — a rename that failed because the source had vanished was the one failure the history never logged. It now appears like every other outcome (and, correctly, can't be undone).
+- **Optional path confinement for servers** — new `CINESORT_SCOPE_TO_BROWSE_ROOTS=1` limits scanning, rename destinations and watch rules to your mounted roots (`/mnt`, `/media`, plus `CINESORT_BROWSE_ROOTS`) instead of everywhere the container user can reach. Off by default and unused by desktop installs; recommended for any Docker instance whose port is published beyond `127.0.0.1`. The README now spells out that the API has no authentication.
+- **A test suite** — 59 regression tests covering detection, path building and the manual-match flows. The repo had none; every bug fixed in this release would have been caught by one.
 
 ### v1.4.3
 - **Drag & drop actually works now** — v1.4.2 moved desktop builds to the native Wayland backend, but the bundled Chromium was older than Chromium's Wayland drag-and-drop rewrite: it read the drag data on the UI thread through several compositor roundtrips *before* telling the page a drag had entered, so the drop zone lit up seconds late and a normal-speed drop was discarded with no error. The desktop runtime is now current (Electron 43), which carries that rewrite — dropping files and folders from Nautilus, Dolphin, Nemo or Thunar registers immediately and lands every time. X11 sessions and the `CINESORT_OZONE` escape hatch are unchanged, and this also brings a year and a half of upstream security fixes.

@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.5.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.5.1-green.svg)
 
 ---
 
@@ -101,20 +101,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.5.0_amd64.deb # arm64: cinesort_1.5.0_arm64.deb
+sudo dpkg -i cinesort_1.5.1_amd64.deb # arm64: cinesort_1.5.1_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.5.0.x86_64.rpm # arm64: cinesort-1.5.0.aarch64.rpm
+sudo dnf install ./cinesort-1.5.1.x86_64.rpm # arm64: cinesort-1.5.1.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.5.0.AppImage # arm64: CineSort-1.5.0-arm64.AppImage
-./CineSort-1.5.0.AppImage
+chmod +x CineSort-1.5.1.AppImage # arm64: CineSort-1.5.1-arm64.AppImage
+./CineSort-1.5.1.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -545,6 +545,11 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.5.1
+- **Picking a show by IMDb ID no longer fails silently** — selecting the right title (by IMDb ID or from the "which one is it?" dialog) could leave every file unmatched with nothing on screen to explain it. The backend was erroring out: TMDb returns a show's year as text while everything else uses a number, and comparing the two crashed the whole request, so all files failed at once — not just the one being matched. Selecting a show now works, and a stray value from a provider can no longer take down an entire match.
+- **The year is no longer part of the show name it searches for** — a file like `Lucky.2026.S01E01.mkv` was searched as "Lucky 2026", which fuzzy-matched a *different* series ("Lucky Luke") and, returning a single result, skipped the "which one is it?" prompt entirely. The year is now used as a filter instead of being part of the title, so the right show is found and genuinely ambiguous names ask you to choose.
+- **Films named after a number keep their names** — "1917", "2012" and "2046" were losing their titles completely (the number was read as the release year, leaving nothing behind), and "Blade Runner 2049" lost both its "2049" and its real year. A number is now only treated as the year when it plausibly is one and something is left of the title.
 
 ### v1.5.0
 - **Match a show or film by its IMDb ID** — pasting a `tt…` ID into Search metadata now works for **series**, not just films. It never could before: IMDb data alone carries no episode list, so a series ID had nowhere to go and the pick was silently dropped. CineSort now translates the ID to the matching TMDb show and runs the normal episode match, so a file named nothing but `tt0903747.mkv` becomes `Breaking Bad - S01E01 - Pilot.mkv`. Needs a TMDb key; without one it says so instead of failing quietly.

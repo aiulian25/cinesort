@@ -215,6 +215,33 @@ NOISE_PATTERNS = [
 ]
 
 
+# A four-digit number in a filename is not automatically a release year:
+# YEAR_PATTERN matches any (19|20)\d{2}, which also hits the NUMBER IN A TITLE
+# — "Blade Runner 2049", "2046", "2012", "1917". Bounding the value and
+# preferring a match that still leaves a title behind is what tells the two
+# apart, and both the year extractor and the title cleaner must agree on which
+# match they picked, or the title keeps a year the search filter does not use.
+YEAR_MIN, YEAR_MAX = 1920, 2030
+
+
+def _release_year_match(name: str):
+    """The match to treat as the release year, or None.
+
+    First choice: a plausible year whose cut still leaves a title behind
+    ("2012.2009" → 2009, keeping "2012"). Falls back to the first plausible
+    match when every candidate would empty the name.
+    """
+    fallback = None
+    for m in YEAR_PATTERN.finditer(name):
+        if not (YEAR_MIN <= int(m.group(1)) <= YEAR_MAX):
+            continue          # 2049 / 2046 — a title number, not a year
+        if fallback is None:
+            fallback = m
+        if name[:m.start()].strip(" ._-"):
+            return m
+    return fallback
+
+
 # A trailing "-GROUP" is only a release group when the filename is actually a
 # scene release. Guard, not a bare regex: `-[A-Za-z0-9]{2,15}$` on its own
 # rewrites "Spider-Man" to "Spider", "Ant-Man" to "Ant" and "X-Men" to "X".
@@ -354,7 +381,7 @@ def clean_name(name: str, episode_info: Optional[EpisodeInfo] = None) -> str:
     cut_applied = cut is not None
 
     # Cut at year for movies
-    ym = YEAR_PATTERN.search(name)
+    ym = _release_year_match(name)
     year_val = None
     if ym:
         year_val = int(ym.group(1))
@@ -362,6 +389,22 @@ def clean_name(name: str, episode_info: Optional[EpisodeInfo] = None) -> str:
         if episode_info is None:
             name = name[:ym.start()]
             cut_applied = True
+        else:
+            # Series: the SxE cut above already removed everything after the
+            # episode marker, so a year left at the END is the release-year
+            # token that sat between title and SxE ("Lucky.2026.S01E01" →
+            # "Lucky.2026."). Keeping it sends "Lucky 2026" to the provider,
+            # which fuzzy-matches a DIFFERENT show ("Lucky Luke") and — being
+            # a single result — skips the disambiguation prompt entirely. The
+            # year is extracted separately and passed as the search filter, so
+            # dropping it from the query loses nothing.
+            tail = re.search(r'[\s._(\[-]*((?:19|20)\d{2})[\s._)\]-]*$', name)
+            if tail and YEAR_MIN <= int(tail.group(1)) <= YEAR_MAX:
+                trimmed = name[:tail.start()]
+                # A show titled AS a year ("1923", "1883") would be erased —
+                # keep the original when nothing meaningful survives.
+                if trimmed.strip(' ._-'):
+                    name = trimmed
 
     # Remove release group prefix [GroupName]
     name = re.sub(r'^\[([^\]]+)\]\s*', '', name)
@@ -413,12 +456,11 @@ def extract_release_group(filename: str) -> Optional[str]:
 
 
 def extract_year(filename: str) -> Optional[int]:
-    m = YEAR_PATTERN.search(Path(filename).stem)
-    if m:
-        y = int(m.group(1))
-        if 1920 <= y <= 2030:
-            return y
-    return None
+    """Release year, agreeing with the one clean_name cut on (see
+    _release_year_match) — otherwise the title would keep a year the provider
+    search does not filter by."""
+    m = _release_year_match(Path(filename).stem)
+    return int(m.group(1)) if m else None
 
 
 def extract_video_format(filename: str) -> Optional[str]:

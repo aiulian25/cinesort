@@ -124,6 +124,55 @@ def test_music_is_not_run_through_the_video_pipeline():
     assert (det.artist, det.track, det.title) == ("Artist", 3, "Song Title")
 
 
+# ── A release year must not end up inside the SEARCH TITLE ────────────────
+
+@pytest.mark.parametrize("filename, expected_clean, expected_year", [
+    # Reported live: "Lucky 2026" made TMDb fuzzy-return only "Lucky Luke",
+    # a single result — so the wrong show was auto-picked with no prompt.
+    ("Lucky.2026.S01E01.No.Shortcuts.2160p.ATVP.WEB-DL.mkv", "Lucky", 2026),
+    ("Doctor.Who.2005.S01E01.720p.HDTV.mkv", "Doctor Who", 2005),
+    ("The.4400.2021.S01E02.1080p.mkv", "The 4400", 2021),
+])
+def test_series_release_year_is_not_part_of_the_title(filename, expected_clean, expected_year):
+    det = detect(Path("/media/tv") / filename)
+    assert det.clean_name == expected_clean
+    assert det.year == expected_year        # still available as the search filter
+
+
+def test_a_show_titled_as_a_year_keeps_its_name():
+    """Stripping a trailing year must not erase "1923" or "1883"."""
+    assert detect(Path("/media/tv/1923.S01E01.1080p.WEB.mkv")).clean_name == "1923"
+
+
+# ── A number IN THE TITLE must not be mistaken for the release year ───────
+
+@pytest.mark.parametrize("filename, expected_clean, expected_year", [
+    # YEAR_PATTERN matches any (19|20)\d{2}, so these numbers all look like
+    # years. Picking the first match blindly cost the film its name: "1917",
+    # "2046" and "2012" cleaned to an EMPTY title (which then fell back to the
+    # parent folder), and "Blade Runner 2049" lost both its number and its
+    # real year.
+    ("Blade.Runner.2049.2017.2160p.UHD.BluRay.x265.mkv", "Blade Runner 2049", 2017),
+    ("1917.2019.1080p.BluRay.x264-GROUP.mkv", "1917", 2019),
+    ("2046.2004.1080p.BluRay.mkv", "2046", 2004),
+    ("2012.2009.1080p.BluRay.x264.mkv", "2012", 2009),
+    ("1984.1984.1080p.BluRay.mkv", "1984", 1984),
+])
+def test_title_numbers_are_not_treated_as_the_release_year(filename, expected_clean, expected_year):
+    det = detect(Path("/media/movies") / filename)
+    assert det.clean_name == expected_clean
+    assert det.year == expected_year
+
+
+def test_clean_name_and_extract_year_agree_on_which_year():
+    """If they disagree the title keeps a year the provider search never
+    filters by — the exact shape of the Blade Runner 2049 failure."""
+    from app.core.detector import clean_name, extract_year
+    f = "Blade.Runner.2049.2017.2160p.UHD.BluRay.x265.mkv"
+    assert extract_year(f) == 2017
+    assert "2049" in clean_name(f) and "2017" not in clean_name(f)
+
+
 # ── Known-bad, documented rather than silently tolerated ──────────────────
 
 @pytest.mark.xfail(reason="F15: SXE_PATTERNS[6] '(?:EP|Episode)' has no left word "

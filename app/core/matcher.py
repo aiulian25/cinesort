@@ -98,7 +98,18 @@ def absolute_episode_match(file_absolute: Optional[int], meta_absolute: int) -> 
 
 
 def year_match(file_year: Optional[int], meta_year: Optional[int]) -> float:
-    """Year matching with ±1 tolerance."""
+    """Year matching with ±1 tolerance.
+
+    Both sides are coerced: providers hand back years as ints, strings
+    ("2026") and occasionally junk, and a metric has no business turning a
+    type mismatch into a 500 that fails every file in the batch. An
+    unparseable year simply carries no signal.
+    """
+    try:
+        file_year = int(file_year) if file_year is not None else None
+        meta_year = int(meta_year) if meta_year is not None else None
+    except (TypeError, ValueError):
+        return 0.0
     if file_year is None or meta_year is None:
         return 0.0
     diff = abs(file_year - meta_year)

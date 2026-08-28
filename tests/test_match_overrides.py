@@ -179,6 +179,34 @@ def test_generated_names_respect_the_filesystem_byte_limit():
         assert len(part.encode("utf-8")) <= 255
 
 
+# ── A provider year of the wrong TYPE must not 500 the whole batch ───────
+
+def test_year_match_tolerates_a_string_year():
+    """TMDb's show-details path hands back first_air_date[:4] — a STRING.
+    Subtracting it from the file's int year raised TypeError inside
+    year_match and 500'd the entire match: every file failed, and the manual
+    override (which is what reaches that path) appeared to do nothing."""
+    from app.core.matcher import year_match, cascade_breakdown
+    assert year_match(2026, "2026") == 1.0
+    assert year_match("2026", 2026) == 1.0
+    assert year_match(2026, "not-a-year") == 0.0
+    # The breakdown is what actually crashed — it must survive too.
+    out = cascade_breakdown("Lucky", 1, 1, None, 2026, "Lucky",
+                            meta_season=1, meta_episode=1, meta_year="2026")
+    assert out["score"] > 0
+
+
+def test_selected_show_year_reaches_scoring_as_an_int(monkeypatch):
+    """Guard the source, not just the symptom: a show picked BY ID must put an
+    int in show_data["year"], like every other producer does."""
+    data = run_match(files=[dict(episode_file(), year=2008)], datasource="tmdb",
+                     selected_show_id=1396, selected_show_name="Breaking Bad")
+    result = data["results"][0]
+    assert result["matched"] is True
+    year_rows = [c for c in result["score_detail"] if c["metric"] == "year"]
+    assert year_rows, "the year metric must have contributed, not been skipped"
+
+
 # ── Known gap, documented rather than silently tolerated ──────────────────
 
 @pytest.mark.xfail(reason="A file DETECTED as series but picked as a movie by id is "

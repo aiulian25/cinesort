@@ -1206,7 +1206,16 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                     show_details = await cached(
                         ("tmdb", "details", req.selected_show_id),
                         lambda: with_retry(lambda: tmdb.get_tv_details(req.selected_show_id)))
-                    show_data = {"id": req.selected_show_id, "name": show_details.get("name"), "year": show_details.get("first_air_date", "")[:4] if show_details.get("first_air_date") else None, "poster": f"https://image.tmdb.org/t/p/w154{show_details.get('poster_path')}" if show_details.get("poster_path") else None}
+                    # int, not str: every other producer of show_data["year"]
+                    # (TMDbResult.year, TVMazeShow.year) is an int, and the
+                    # scoring metrics subtract it from the file's year. A
+                    # string here raised TypeError inside year_match and 500'd
+                    # the whole match — reachable whenever a show picked BY ID
+                    # met files that carry a year, i.e. the manual-override
+                    # flow doing its job.
+                    _first_air = show_details.get("first_air_date") or ""
+                    _show_year = int(_first_air[:4]) if _first_air[:4].isdigit() else None
+                    show_data = {"id": req.selected_show_id, "name": show_details.get("name"), "year": _show_year, "poster": f"https://image.tmdb.org/t/p/w154{show_details.get('poster_path')}" if show_details.get("poster_path") else None}
                     seasons = show_details.get("seasons", [])
                     for s in seasons:
                         sn = s.get("season_number", 0)

@@ -4,6 +4,7 @@ Free API with generous limits. https://www.themoviedb.org/documentation/api
 """
 
 import os
+import re
 import httpx
 from dataclasses import dataclass, field
 from typing import Optional
@@ -11,6 +12,13 @@ from typing import Optional
 
 API_BASE = "https://api.themoviedb.org/3"
 IMAGE_BASE = "https://image.tmdb.org/t/p"
+
+# An IMDb id is interpolated into the request PATH (/find/{id}), so its shape
+# is validated before it is sent — the same guard omdb.get_by_imdb_id()
+# applies to its own query parameter. Callers must not be trusted to have
+# checked: a value carrying path separators or a query string would otherwise
+# steer the request at a different TMDb endpoint.
+_IMDB_ID_RE = re.compile(r"tt\d{7,8}")
 
 
 
@@ -150,6 +158,24 @@ class TMDbClient:
 
     async def get_movie_details(self, movie_id: int) -> dict:
         resp = await self._client.get(f"/movie/{movie_id}")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def find_by_imdb_id(self, imdb_id: str) -> dict:
+        """TMDb records for an IMDb tt-ID:
+        ``{'movie_results': [...], 'tv_results': [...]}``.
+
+        This is the bridge from an IMDb id to the TMDb id that the TMDb-only
+        flows need — episode lists above all, which OMDb cannot serve at any
+        price. Empty dict when no key is configured (mirrors search_movie /
+        search_tv returning [] while disabled); ValueError on a malformed id.
+        """
+        if not self.enabled:
+            return {}
+        if not _IMDB_ID_RE.fullmatch(imdb_id):
+            raise ValueError(f"Invalid IMDb ID format: {imdb_id!r}")
+        resp = await self._client.get(
+            f"/find/{imdb_id}", params={"external_source": "imdb_id"})
         resp.raise_for_status()
         return resp.json()
 

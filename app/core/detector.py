@@ -198,9 +198,36 @@ NOISE_PATTERNS = [
     AUDIO_CODEC_PATTERN,
     VIDEO_TAGS_PATTERN,
     re.compile(r'\b(?:MULTI|DUAL|MULTi\.?SUBS?)\b', re.IGNORECASE),
+    # Release tokens that are never title words — safe case-insensitively.
+    re.compile(r'\b(?:Hybrid|REMUX|HDR10(?:Plus|\+)?)\b', re.IGNORECASE),
+    # Language / dub tags. CASE-SENSITIVE on purpose: scene grammar writes
+    # these in caps or the stylized lowercase-i form (GERMAN.DL, iTALiAN,
+    # SPANiSH), while real titles use ordinary capitalization — and matching
+    # case-insensitively would strip the word out of "The Italian Job", "The
+    # French Connection", "The Danish Girl" and "French Kiss", turning a
+    # mismatch bug into a far worse one. Both spellings are listed so the
+    # scene forms still match.
+    re.compile(r'\b(?:GERMAN|FRENCH|TRUEFRENCH|ITALIAN|iTALiAN|SPANISH|SPANiSH|'
+               r'NORDIC|NORDiC|SWEDISH|SWEDiSH|DANISH|DANiSH|FINNISH|FiNNiSH|'
+               r'DUBBED|SUBBED|VFF|VFQ|VOSTFR|DL)\b'),
     re.compile(r'\[[\w\-]+\]'),  # [tags]
     re.compile(r'\([\w\-]+\)'),  # (tags) at end
 ]
+
+
+# A trailing "-GROUP" is only a release group when the filename is actually a
+# scene release. Guard, not a bare regex: `-[A-Za-z0-9]{2,15}$` on its own
+# rewrites "Spider-Man" to "Spider", "Ant-Man" to "Ant" and "X-Men" to "X".
+_TRAILING_GROUP_RE = re.compile(r'-[A-Z0-9]{2,15}$')
+
+
+def _looks_like_release(stem: str) -> bool:
+    """True when the filename carries source/format/codec/audio tags — i.e.
+    scene grammar, where a trailing token is a group rather than title text."""
+    return any(p.search(stem) for p in (
+        VIDEO_SOURCE_PATTERN, VIDEO_FORMAT_PATTERN,
+        VIDEO_CODEC_PATTERN, AUDIO_CODEC_PATTERN,
+    ))
 
 
 def is_video_file(path: Path) -> bool:
@@ -305,6 +332,7 @@ def clean_name(name: str, episode_info: Optional[EpisodeInfo] = None) -> str:
 
     # Remove file extension
     name = Path(name).stem
+    stem0 = name          # pre-cut copy — used to recognize scene grammar below
 
     # Cut at the season/episode marker — but ignore pseudo-SxE fragments that
     # sit inside a full date (see parse_episode_info); those files cut at the
@@ -323,6 +351,7 @@ def clean_name(name: str, episode_info: Optional[EpisodeInfo] = None) -> str:
         cut = dm.start()
     if cut is not None:
         name = name[:cut]
+    cut_applied = cut is not None
 
     # Cut at year for movies
     ym = YEAR_PATTERN.search(name)
@@ -332,6 +361,7 @@ def clean_name(name: str, episode_info: Optional[EpisodeInfo] = None) -> str:
         # Only cut if it looks like a movie (no episode info)
         if episode_info is None:
             name = name[:ym.start()]
+            cut_applied = True
 
     # Remove release group prefix [GroupName]
     name = re.sub(r'^\[([^\]]+)\]\s*', '', name)
@@ -339,6 +369,21 @@ def clean_name(name: str, episode_info: Optional[EpisodeInfo] = None) -> str:
     # Strip noise
     for p in NOISE_PATTERNS:
         name = p.sub('', name)
+
+    # A release group survives only when nothing cut the name short — a year
+    # or SxE cut already removed everything after the title. Three conditions,
+    # each closing a way the strip would eat real titles:
+    #   * no cut happened   — else "Mad-Max.2015…-GRP" cuts to "Mad-Max" and
+    #                         the tail "-Max" is title text, not a group;
+    #   * scene grammar     — "Spider-Man.mkv" has no release tags, so its
+    #                         "-Man" must be left alone;
+    #   * ALL-CAPS tail     — groups are written SPARKS/RARBG/AOC, while title
+    #                         words are capitalized ("Man", "Men", "Max").
+    # A mixed-case group (Tigole, Vyndros) is deliberately left in place: the
+    # trimmed-query cascade in main.py drops trailing tokens anyway, so a
+    # residual token is recoverable — a truncated title is not.
+    if not cut_applied and _looks_like_release(stem0):
+        name = _TRAILING_GROUP_RE.sub('', name.strip())
 
     # Normalize separators: dots, underscores → spaces
     name = re.sub(r'[._]', ' ', name)

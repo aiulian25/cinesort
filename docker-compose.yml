@@ -3,6 +3,10 @@ services:
     image: aiulian25/cinesort:latest
     container_name: cinesort
     ports:
+      # The API is unauthenticated: anyone who can reach this port can browse
+      # and move files in the mounts below. Bind it to localhost
+      # ("127.0.0.1:8888:8888") unless the LAN is trusted, and see
+      # CINESORT_SCOPE_TO_BROWSE_ROOTS below.
       - "8888:8888"
     environment:
       # User/Group IDs for file permissions (match your host user)
@@ -13,6 +17,12 @@ services:
       # Optional: Custom TMDb API key (get yours at https://www.themoviedb.org/settings/api)
       # Required for TV + movie metadata. Without it the TMDb source is disabled.
       # - TMDB_API_KEY=your_tmdb_api_key_here
+
+      # Optional hardening: confine scanning, renaming and watch rules to the
+      # browsable roots (/mnt, /media, plus CINESORT_BROWSE_ROOTS) instead of
+      # anywhere the container user can reach. Recommended whenever the port
+      # below is published beyond 127.0.0.1 — the API has no authentication.
+      # - CINESORT_SCOPE_TO_BROWSE_ROOTS=1
 
       # Optional: OMDb API key — enables IMDb data + adult-title fallback
       # Free tier: 1,000 requests/day. Get yours at https://www.omdbapi.com/apikey.aspx

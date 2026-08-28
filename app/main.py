@@ -38,7 +38,9 @@ from app.core.detector import (
 from app.core.matcher import (
     cascade_score, cascade_breakdown, name_similarity, normalize, METRIC_LABELS,
 )
-from app.core.formatter import apply_template, build_new_path, TEMPLATES, sanitize_filename
+from app.core.formatter import (
+    apply_template, build_new_path, TEMPLATES, sanitize_filename, truncate_component,
+)
 from app.core.renamer import execute_rename, RenameAction, RenameResult
 from app.core.history import history, HistoryEntry, _prune_empty_dirs, _common_ancestor
 from app.core.config import load_config, save_config, read_config_status, read_file_keys, config_file
@@ -138,6 +140,8 @@ class ScanRequest(BaseModel):
         p = Path(v).expanduser().resolve()
         if not p.exists():
             raise ValueError(f"Path does not exist: {v}")
+        # No-op unless CINESORT_SCOPE_TO_BROWSE_ROOTS=1 (see _require_within_roots).
+        _require_within_roots(p, "Scanning")
         return str(p)
 
 
@@ -152,6 +156,10 @@ class BatchScanRequest(BaseModel):
         for p in v:
             resolved = Path(p).expanduser().resolve()
             if resolved.exists():
+                # Rejected LOUDLY rather than skipped: silently dropping half a
+                # multi-folder selection looks like the app lost the files.
+                # (No-op unless scoping is enabled.)
+                _require_within_roots(resolved, "Scanning")
                 out.append(str(resolved))
         if not out:
             raise ValueError("No valid paths provided")
@@ -204,6 +212,7 @@ class MatchRequest(BaseModel):
             raise ValueError(f"Destination does not exist: {v}")
         if not p.is_dir():
             raise ValueError(f"Destination is not a folder: {v}")
+        _require_within_roots(p, "The destination folder")
         return str(p)
 
 
@@ -435,6 +444,41 @@ def _within_roots(p: Path, roots: list[Path]) -> bool:
     return any(p == root or root in p.parents for root in roots)
 
 
+# ── Optional path scoping (deployment layer) ──────────────────────────────────
+# CINESORT_SCOPE_TO_BROWSE_ROOTS=1 confines the FILE-TOUCHING endpoints — scan,
+# match destinations, rename, watch rules — to the same allow-list /api/browse
+# already honors. Off by default, and deliberately so: the API is
+# unauthenticated, and on desktop the boundary is the OS user's own
+# permissions (the native picker reaches $HOME by design, which an always-on
+# restriction would break). It exists for the deployment that publishes the
+# container port beyond localhost, where "any LAN client can rearrange every
+# mounted volume" stops being acceptable.
+#
+# This is configuration, not app logic: the same code runs on every build
+# target and simply reads a different environment.
+def _scope_enforced() -> bool:
+    return os.environ.get("CINESORT_SCOPE_TO_BROWSE_ROOTS", "0") == "1"
+
+
+def _require_within_roots(p: Path, action: str) -> None:
+    """No-op unless scoping is on; otherwise raise ValueError for a path
+    outside the allow-list.
+
+    `p` must already be resolve()d — the caller's symlink and ``..`` collapsing
+    is what makes this check meaningful. Roots are resolved here too, so a
+    legitimately symlinked root (/media → /srv/media) still matches.
+    """
+    if not _scope_enforced():
+        return
+    roots = [r.resolve() for r in browse_roots()]
+    if not _within_roots(p, roots):
+        allowed = ", ".join(str(r) for r in roots)
+        raise ValueError(
+            f"{action} is restricted to the configured roots ({allowed}) "
+            f"because CINESORT_SCOPE_TO_BROWSE_ROOTS is enabled: {p}"
+        )
+
+
 @app.get("/api/browse-roots")
 async def get_browse_roots():
     """Return the browsable roots (quick-access shortcuts) and the default
@@ -533,7 +577,9 @@ async def search_metadata(
 
     When `imdb_id` is provided it takes precedence over the text query and
     returns at most one exact OMDb result (the client validates the tt-ID
-    format and raises ValueError on garbage → 400 here)."""
+    format and raises ValueError on garbage → 400 here). A SERIES result is
+    additionally translated to its TMDb id, because renaming episodes needs an
+    episode list and OMDb has none — see the tv_results block below."""
     results = []
 
     if imdb_id:
@@ -547,7 +593,7 @@ async def search_metadata(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         if r:
-            results.append({
+            entry = {
                 "id": r.imdb_id,
                 "title": r.title,
                 "year": r.year,
@@ -556,7 +602,32 @@ async def search_metadata(
                 "type": r.media_type,
                 "rating": r.imdb_rating,
                 "datasource": "omdb",
-            })
+            }
+            # A series tt-ID is useless on its own: OMDb identifies the show
+            # but serves no episode list, so nothing downstream can build
+            # "Show - S01E01 - Title". TMDb's /find endpoint translates the
+            # IMDb id into the TMDb id that the existing selected_show_id
+            # match flow already knows how to use — no new match machinery.
+            # `type` is normalized to "tv" so the client routes it down the
+            # show flow rather than treating it as a movie.
+            #
+            # Best-effort: on any failure (no TMDb key, network, or a title
+            # TMDb doesn't carry) the OMDb-only entry is still returned and
+            # the UI explains why that one can't be renamed — a partial answer
+            # beats a 500.
+            if r.media_type == "series" and tmdb.enabled:
+                try:
+                    found = (await tmdb.find_by_imdb_id(
+                        imdb_id.strip())).get("tv_results") or []
+                    if found:
+                        entry["type"] = "tv"
+                        entry["tmdb_id"] = found[0]["id"]
+                except Exception as exc:
+                    # Sanitized: TMDb errors embed the request URL, which
+                    # carries ?api_key= — it must never reach a log users share.
+                    print(f"[WARN] TMDb /find failed for {imdb_id!r}: "
+                          f"{_sanitize_error(exc)}")
+            results.append(entry)
         return {"results": results}
 
     if datasource == "tmdb":
@@ -1299,6 +1370,10 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                         "score": round(best_score, 3),
                         "score_detail": score_detail,
                         "matched": True,
+                        # Series twin of the movie flag above: set when the
+                        # show was chosen by id (disambiguation dialog or
+                        # Search metadata), not found by title search.
+                        "pinned": bool(req.selected_show_id),
                         "metadata": {
                             "show": show_data.get("name"),
                             "season": best_ep["season"],
@@ -1525,6 +1600,17 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                         best_score = score
                         best_movie = candidate
 
+                # An explicit pick is a decision, not a guess. The loop above
+                # starts at best_score = 0.0 and cascade_score clamps to 0.0
+                # (matcher._aggregate), so a picked movie whose real year
+                # contradicts a junk year parsed out of the filename scored
+                # exactly 0.0, lost to nothing, and fell through to "No close
+                # match" — silently discarding the record the user had just
+                # chosen by id. Restore it; the honest (low) score is kept so
+                # "Why this match" stays truthful about the name/year evidence.
+                if exact_pick and best_movie is None and movie_candidates:
+                    best_movie = movie_candidates[0]
+
                 if best_movie:
                     # Per-metric breakdown for the chosen candidate (item 7).
                     score_detail = cascade_breakdown(
@@ -1561,6 +1647,11 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                         "score": round(min(best_score, 1.0), 3),
                         "score_detail": score_detail,
                         "matched": True,
+                        # The user picked this exact record by id (movie
+                        # disambiguation dialog or Search metadata). The score
+                        # stays honest, but the UI must not treat a pinned row
+                        # as a weak guess and gate it out of the rename batch.
+                        "pinned": exact_pick,
                         "metadata": {
                             "title": best_movie["title"],
                             "year": best_movie.get("year"),
@@ -1658,7 +1749,17 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
         if companion:
             # Derive new subtitle path from the companion video's new_path
             companion_new = Path(companion["new_path"])
-            new_sub_name = companion_new.stem + lang_tag + sub_ext
+            # The video's name is already truncated to the filesystem limit by
+            # build_new_path, but a subtitle appends MORE to that stem
+            # (".en" + ".srt"), which pushes it back over. This name is built
+            # by concatenation and never passes through build_new_path, so it
+            # needs the same byte budget applied explicitly — otherwise the
+            # over-long path makes Path.exists() raise ENAMETOOLONG in the
+            # conflict scan below and 500s the WHOLE match, not just this file.
+            new_sub_name = truncate_component(
+                companion_new.stem,
+                reserve=len((lang_tag + sub_ext).encode("utf-8")),
+            ) + lang_tag + sub_ext
             new_sub_path = companion_new.parent / new_sub_name
             results.append({
                 "original": sf["path"],
@@ -1668,6 +1769,13 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                 "preview": new_sub_name,
                 "score": companion["score"],
                 "matched": True,
+                # Inherit the companion's pinned flag along with its score.
+                # A subtitle carries no evidence of its own — it is renamed
+                # BECAUSE its video was. Without this the frontend's
+                # confidence gate keeps a pinned low-score video selected but
+                # drops its subtitle, renaming the video and orphaning the
+                # .srt beside it under the old name.
+                "pinned": companion.get("pinned", False),
                 "metadata": companion.get("metadata"),
                 "is_subtitle": True,
             })
@@ -1755,16 +1863,22 @@ def _rename_sync(operations: list, action: RenameAction, batch_id: str,
         prog["current"] += 1
         prog["file"] = source.name
 
+        # A missing source is expressed as a normal failed RenameResult rather
+        # than an early `continue`, so it flows through the SAME result +
+        # history append as every other outcome below. The old shortcut skipped
+        # the history write, which made this the one failure class the audit
+        # log never recorded — precisely the class a post-mortem needs.
         if not source.exists():
-            results.append({
-                "original": str(source),
-                "destination": str(dest),
-                "success": False,
-                "error": "Source file not found",
-            })
-            continue
+            result = RenameResult(
+                original=source,
+                destination=dest,
+                action=action,
+                success=False,
+                error="Source file not found",
+            )
+        else:
+            result = execute_rename(source, dest, action)
 
-        result = execute_rename(source, dest, action)
         results.append({
             "original": str(result.original),
             "destination": str(result.destination),
@@ -1815,6 +1929,22 @@ def _rename_sync(operations: list, action: RenameAction, batch_id: str,
 @app.post("/api/rename")
 async def rename_files(req: RenameRequest):
     """Execute rename operations in a worker thread with live progress."""
+    # Scoping check (no-op unless CINESORT_SCOPE_TO_BROWSE_ROOTS=1). BOTH ends
+    # of every operation are checked: a destination inside the roots would
+    # otherwise still let a caller read a file out of any path on the host,
+    # and a source inside them would let it write anywhere. resolve() collapses
+    # `..` and symlinks first, so neither can be used to step outside.
+    if _scope_enforced():
+        for op in req.operations:
+            for key, label in (("original", "The source"), ("new_path", "The destination")):
+                raw = op.get(key)
+                if not raw:
+                    continue
+                try:
+                    _require_within_roots(Path(raw).expanduser().resolve(), label)
+                except ValueError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc))
+
     action = RenameAction(req.action)
     # One Rename click = one history batch (drives "Undo all" in the UI).
     batch_id = str(uuid.uuid4())
@@ -1887,6 +2017,19 @@ def _watch_interval() -> float:
 
 async def _watch_one(w: dict) -> None:
     folder = w["folder"]
+    # Enabling the flag must also neutralize rules saved while it was off —
+    # otherwise the hardening only applies to deployments that were already
+    # clean. Logged, not silently skipped, so the admin can see why a rule
+    # stopped acting.
+    if _scope_enforced():
+        try:
+            _require_within_roots(Path(folder).expanduser().resolve(), "This watched folder")
+            out = (w.get("output_dir") or "").strip()
+            if out:
+                _require_within_roots(Path(out).expanduser().resolve(), "This watch destination")
+        except ValueError as exc:
+            _watch_log_add(folder, f"skipped — {exc}")
+            return
     if not Path(folder).is_dir():
         # Unmounted NAS etc. — the rule survives (load is shape-only), the
         # cycle just says why nothing happened.
@@ -2013,6 +2156,24 @@ async def get_watches():
 async def post_watches(req: WatchListRequest):
     """Replace the full rule list (the Settings card edits client-side and
     saves whole — the keys.env save pattern)."""
+    # Without this, saving a watch rule would be a trivial bypass: the rule's
+    # own move runs through _rename_sync directly, never touching the guarded
+    # /api/rename endpoint. A control with an open side door is worse than no
+    # control, because it invites trust it hasn't earned.
+    if _scope_enforced():
+        for w in (req.watches or []):
+            if not isinstance(w, dict):
+                continue
+            for key, label in (("folder", "A watched folder"),
+                               ("output_dir", "A watch destination")):
+                raw = (w.get(key) or "").strip()
+                if not raw:
+                    continue
+                try:
+                    _require_within_roots(Path(raw).expanduser().resolve(), label)
+                except ValueError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc))
+
     try:
         saved = save_watches(req.watches)
     except ValueError as exc:

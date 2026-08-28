@@ -126,6 +126,12 @@ def execute_rename(
             msg = f"Permission denied: {exc.filename}"
         elif exc.errno == errno.ENOSPC:
             msg = "No space left on the target device."
+        elif exc.errno == errno.ENAMETOOLONG:
+            # build_new_path truncates, so reaching this means the name came
+            # from somewhere else (a hand-edited operation, a shorter limit on
+            # an exotic mount) — say what is wrong instead of "[Errno 36]".
+            msg = ("The generated name is longer than the filesystem allows "
+                   "(255 bytes). Shorten the template or the manual name.")
         else:
             msg = str(exc)
         return RenameResult(

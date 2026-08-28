@@ -61,6 +61,11 @@ prompt.txt
 docker-compose.override.yml
 docker-compose.dev.yml
 
+# Dev-only test tooling. pytest is installed here rather than into .venv
+# because package.json ships .venv wholesale into every deb/rpm/AppImage
+# (extraResources) — dev tools must not land on users' disks.
+.devtools/
+
 # Environment files
 .env
 .env.local

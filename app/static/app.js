@@ -34,7 +34,12 @@ let REVIEW_CONFIDENCE = 0.6;
 function applyConfidenceGate() {
     for (let i = 0; i < matchResults.length; i++) {
         const m = matchResults[i];
-        if (m && m.matched && !m.manual && m.score < LOW_CONFIDENCE) {
+        // `pinned` = the user chose this record by id (movie/show
+        // disambiguation or Search metadata). Its score stays honest and can
+        // be low — name similarity against a deliberately-picked title often
+        // is — but the SELECTION reflects a decision, not a guess, so the
+        // gate must not silently undo it. Same standing as a manual name.
+        if (m && m.matched && !m.manual && !m.pinned && m.score < LOW_CONFIDENCE) {
             selectedSet.delete(i);
         }
     }
@@ -108,7 +113,7 @@ function updateFooter() {
         const m = matchResults[i];
         if (m && m.matched) {
             if (selectedSet.has(i)) ready++;
-            if (!m.manual && m.score < REVIEW_CONFIDENCE) review++;
+            if (!m.manual && !m.pinned && m.score < REVIEW_CONFIDENCE) review++;
         }
     }
     btnRename.disabled = ready === 0;
@@ -119,7 +124,7 @@ function updateFooter() {
         btnReview.textContent = `Review ${review} match${review === 1 ? "" : "es"}`;
     }
     if (statHigh && statReview) {
-        const high = matchResults.filter(r => r && r.matched && (r.manual || r.score >= REVIEW_CONFIDENCE)).length;
+        const high = matchResults.filter(r => r && r.matched && (r.manual || r.pinned || r.score >= REVIEW_CONFIDENCE)).length;
         statHigh.classList.toggle("hidden", high === 0);
         statHigh.textContent = `${high} high`;
         statReview.classList.toggle("hidden", review === 0);
@@ -172,7 +177,7 @@ $id("btn-home")?.addEventListener("click", startOver);
 btnReview?.addEventListener("click", () => {
     for (let i = 0; i < matchResults.length; i++) {
         const m = matchResults[i];
-        if (m && m.matched && !m.manual && m.score < REVIEW_CONFIDENCE) {
+        if (m && m.matched && !m.manual && !m.pinned && m.score < REVIEW_CONFIDENCE) {
             focusRow(i);
             rightList.querySelector(`.row-item[data-idx="${i}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
             break;
@@ -2509,7 +2514,7 @@ function renderRight() {
             // Status icon replaces the old %-score tag: check = high confidence
             // or manual, triangle = needs review. Exact score + per-metric
             // breakdown remain in the right-click "View metadata" dialog.
-            const isHigh = isManual || m.score >= REVIEW_CONFIDENCE;
+            const isHigh = isManual || m.pinned || m.score >= REVIEW_CONFIDENCE;
             const icon = isHigh ? ICON_OK : ICON_REV;
             const manualTag = isManual ? `<span class="tag manual">manual</span>` : "";
 
@@ -3003,12 +3008,32 @@ window.R = {
         if (!c || !f) return;
         delete window._searchCandidates;
 
-        if (c.type === "tv") {
+        // "tv" comes from a TMDb/TVmaze title search; "series" is OMDb's own
+        // word, returned by the IMDb-ID lookup. Both are shows and must take
+        // the show flow — testing only for "tv" sent every tt-ID series pick
+        // into the movie branch, where the backend silently discarded it.
+        if (c.type === "tv" || c.type === "series") {
+            // The show flow needs a numeric provider id. A TMDb id resolved
+            // from the tt-ID (backend /api/search) is preferred; c.id is only
+            // numeric for a title search. An OMDb series that could not be
+            // resolved leaves the tt-string here — refuse honestly rather
+            // than POST a string the backend would fail to use.
+            const showId = c.tmdb_id ?? c.id;
+            if (typeof showId !== "number") {
+                statusDone(appSettings && appSettings.tmdb_enabled
+                    ? "TMDb has no series record for that IMDb ID — search by title instead."
+                    : "Series lookup by IMDb ID needs a TMDb key — add one in Settings, or search by title.");
+                return;
+            }
+            // Send the source the id actually BELONGS to, not whatever the
+            // Source dropdown happens to show: a TMDb id posted with
+            // datasource "tvmaze" fetches a different show entirely.
+            const ds = c.tmdb_id ? "tmdb" : (c.datasource === "tvmaze" ? "tvmaze" : "tmdb");
             // Whole detection group — mirrors the backend's grouping key.
             window._pendingMatchFiles = scannedFiles.filter(
                 x => x.clean_name === f.clean_name
             );
-            await R.selectShow(c.id, c.title);
+            await R.selectShow(showId, c.title, null, ds);
             return;
         }
 
@@ -3087,7 +3112,7 @@ window.R = {
         delete window._pendingMatchFiles;
     },
 
-    async selectShow(showId, showName, e) {
+    async selectShow(showId, showName, e, dsOverride) {
         if (e && e.target) {
             e.target.disabled = true;
             e.target.textContent = "Loading...";
@@ -3104,8 +3129,12 @@ window.R = {
             const data = await api("/api/match", {
                 method: "POST",
                 body: JSON.stringify({
+                    // dsOverride: the provider the picked id belongs to.
+                    // Omitted by the disambiguation dialog, whose candidate
+                    // ids come from req.datasource by construction — so the
+                    // dropdown is the right answer there.
                     files: filesToMatch,
-                    datasource: elSource.value,
+                    datasource: dsOverride || elSource.value,
                     template: elTemplate.value,
                         output_dir: elDest?.value.trim() || null,
                     selected_show_id: showId,
@@ -3127,7 +3156,13 @@ window.R = {
             }
             for (let i = 0; i < scannedFiles.length; i++) {
                 const r = resultMap.get(scannedFiles[i].path);
-                if (r) matchResults[i] = r;
+                if (r) {
+                    matchResults[i] = r;
+                    // Explicit pick = consent, the rule selectMovie already
+                    // follows. Without it the gate below deselects the very
+                    // rows the user just fixed by hand.
+                    if (r.matched && r.pinned) selectedSet.add(i);
+                }
             }
 
             applyConfidenceGate();
@@ -3354,7 +3389,14 @@ window.R = {
             preview:  newFilename,
             metadata: null,
         };
+        // Naming a file IS consent to rename it — the same rule the explicit
+        // id-pick paths follow. Without this a row the confidence gate had
+        // deselected (precisely the rows people hand-name) keeps its
+        // deselection through the edit, and Rename silently skips the file
+        // the user just named.
+        selectedSet.add(idx);
 
+        renderLeft();     // restore the checkbox + undim the left row
         renderRight();
         renderGutter();
         updateFooter();
@@ -3426,7 +3468,8 @@ function bulkSelect(predicate) {
     renderRight();
 }
 $id("bulk-matched")?.addEventListener("click", () => bulkSelect(m => !!(m && m.matched)));
-$id("bulk-high")?.addEventListener("click", () => bulkSelect(m => !!(m && m.matched && m.score >= REVIEW_CONFIDENCE)));
+$id("bulk-high")?.addEventListener("click", () => bulkSelect(m =>
+    !!(m && m.matched && (m.manual || m.pinned || m.score >= REVIEW_CONFIDENCE))));
 $id("bulk-clear-unmatched")?.addEventListener("click", () => {
     // Deselect rows that have no match; leave matched selections untouched.
     for (let i = 0; i < scannedFiles.length; i++) {

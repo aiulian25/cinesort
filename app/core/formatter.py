@@ -119,6 +119,29 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
+# Per-component filename limit on every Linux filesystem CineSort targets
+# (ext4, xfs, btrfs, and the FUSE/SMB mounts NAS users point it at). The limit
+# is BYTES, not characters — a 200-character CJK title is ~600 bytes and fails
+# a rename the UI happily previewed.
+MAX_NAME_BYTES = 255
+
+
+def truncate_component(name: str, reserve: int = 0) -> str:
+    """Trim one path component to MAX_NAME_BYTES - reserve UTF-8 bytes.
+
+    Never splits a character (the tail of a partially-sliced multi-byte
+    sequence is dropped), and re-trims trailing dots/spaces that the cut can
+    expose — sanitize_filename already removed them once, but slicing can
+    leave a new one behind. `reserve` covers a suffix the caller appends,
+    i.e. the file extension.
+    """
+    budget = max(0, MAX_NAME_BYTES - reserve)
+    raw = name.encode("utf-8")
+    if len(raw) <= budget:
+        return name
+    return raw[:budget].decode("utf-8", errors="ignore").rstrip(". ")
+
+
 def build_new_path(
     original: Path,
     template: str,
@@ -135,9 +158,17 @@ def build_new_path(
     # Keep original extension
     ext = original.suffix
 
-    # Last part gets the extension
+    # Enforce the filesystem's per-component byte limit HERE — the single
+    # point every producer flows through (interactive match, live preview,
+    # dry run, watch-folder runs). Doing it at build time means the name the
+    # UI shows is the name that will actually be written; the previous
+    # behavior previewed a name, reported dry-run success, then failed the
+    # real rename with a raw [Errno 36].
+    # Directory components are truncated too: a long {n} folder would fail
+    # mkdir with the same error.
     if parts:
-        parts[-1] = parts[-1] + ext
+        parts[:-1] = [truncate_component(p) for p in parts[:-1]]
+        parts[-1] = truncate_component(parts[-1], reserve=len(ext.encode("utf-8"))) + ext
 
     base = output_dir if output_dir else original.parent
     return base.joinpath(*parts)

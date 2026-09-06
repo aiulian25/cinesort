@@ -36,28 +36,74 @@ def format_sxe(season: Optional[int], episode: Optional[int], episode_end: Optio
     return result
 
 
+# ── The token reference ───────────────────────────────────────────────────
+# ONE table, three consumers: GET /api/tokens (which the Settings palette
+# renders), tools/gen_token_table.py (which writes the README table), and
+# unknown_tokens() below. Three hand-maintained lists is how {e00} came to
+# work but be undocumented, and how {quality} came to be documented in the UI
+# and nowhere else.
+#
+# `kind` says where a token has a value: "all" everywhere, "series"/"movie"
+# for their own matches, "video" for both but not music, "music" for audio.
+TOKENS: list[dict] = [
+    {"name": "{n}", "description": "Series or movie name", "example": "Breaking Bad", "kind": "all"},
+    {"name": "{name}", "description": "Series or movie name (same as {n})", "example": "Breaking Bad", "kind": "all"},
+    {"name": "{y}", "description": "Year", "example": "2008", "kind": "all"},
+    {"name": "{year}", "description": "Year (same as {y})", "example": "2008", "kind": "all"},
+    {"name": "{t}", "description": "Episode title, movie title, or track title", "example": "Pilot", "kind": "all"},
+    {"name": "{title}", "description": "Same as {t}", "example": "Pilot", "kind": "all"},
+
+    {"name": "{s}", "description": "Season number", "example": "1", "kind": "series"},
+    {"name": "{e}", "description": "Episode number", "example": "5", "kind": "series"},
+    {"name": "{s00}", "description": "Season number, zero-padded", "example": "01", "kind": "series"},
+    {"name": "{e00}", "description": "Episode number, zero-padded", "example": "05", "kind": "series"},
+    {"name": "{s00e00}", "description": "S01E05 — range-aware for multi-episode files", "example": "S01E05", "kind": "series"},
+    {"name": "{e_end}", "description": "Last episode of a multi-episode file", "example": "6", "kind": "series"},
+    {"name": "{absolute}", "description": "Absolute episode number (anime)", "example": "42", "kind": "series"},
+    {"name": "{d}", "description": "Air date", "example": "2008-01-20", "kind": "series"},
+
+    {"name": "{source}", "description": "Release source", "example": "WEB-DL", "kind": "video"},
+    {"name": "{vf}", "description": "Video format / resolution", "example": "1080p", "kind": "video"},
+    {"name": "{quality}", "description": "Same as {vf}", "example": "1080p", "kind": "video"},
+    {"name": "{group}", "description": "Release group", "example": "GROUP", "kind": "video"},
+    {"name": "{codec}", "description": "Video codec", "example": "x265", "kind": "video"},
+    {"name": "{audio}", "description": "Audio codec", "example": "DTS-HD", "kind": "video"},
+    {"name": "{edition}", "description": "Edition tag — empty when none", "example": "Extended", "kind": "movie"},
+    {"name": "{part}", "description": "Part number of a split release — empty when single", "example": "2", "kind": "movie"},
+    {"name": "{partN}", "description": '" - Part 2" for a split release — empty otherwise', "example": " - Part 2", "kind": "movie"},
+    {"name": "{collection}", "description": "TMDb franchise name — empty when the film is standalone", "example": "Iron Man Collection", "kind": "movie"},
+    {"name": "{collectionN}", "description": "Franchise name plus \"/\" — nests franchise films one folder deeper, standalone films unchanged", "example": "Iron Man Collection/", "kind": "movie"},
+
+    {"name": "{id}", "description": "Database id of the matched record (source-dependent)", "example": "1396", "kind": "all"},
+    {"name": "{tmdbid}", "description": "TMDb id — empty unless the match came from TMDb", "example": "1396", "kind": "all"},
+    {"name": "{imdbid}", "description": "IMDb id — films via OMDb/TMDb, series via TMDb/TVmaze", "example": "tt0903747", "kind": "all"},
+
+    {"name": "{artist}", "description": "Track artist", "example": "Radiohead", "kind": "music"},
+    {"name": "{album}", "description": "Album title", "example": "OK Computer", "kind": "music"},
+    {"name": "{track}", "description": "Track number, zero-padded", "example": "03", "kind": "music"},
+]
+
+KNOWN_TOKENS = frozenset(t["name"] for t in TOKENS)
+
+_TOKEN_RE = re.compile(r'\{(\w+)\}')
+
+
+def unknown_tokens(template: str) -> list[str]:
+    """Token names in `template` that resolve to nothing.
+
+    apply_template leaves an unrecognised {episode} in the output as literal
+    text, which reads as a formatter bug rather than a typo. Naming them lets
+    the live preview say so.
+    """
+    return [name for name in _TOKEN_RE.findall(template or "")
+            if "{" + name + "}" not in KNOWN_TOKENS]
+
+
 def apply_template(template: str, bindings: dict[str, Any]) -> str:
     """Apply a naming template with {variable} placeholders.
-    Supports FileBot-style variables:
-      {n}       - series/movie name
-      {y}       - year
-      {s}       - season number
-      {e}       - episode number
-      {s00}     - zero-padded season
-      {e00}     - zero-padded episode
-      {s00e00}  - formatted SxE
-      {t}       - episode/movie title
-      {absolute}- absolute episode number
-      {d}       - air date
-      {source}  - video source
-      {vf}      - video format
-      {group}   - release group
-      {codec}   - video codec (x265, HEVC…)
-      {audio}   - audio codec (DTS-HD, AAC…)
-      {edition} - edition tag (Extended, Director's…)
-      {id}      - database ID (source-dependent; kept for compatibility)
-      {tmdbid}  - TMDb id (empty unless the match came from TMDb)
-      {imdbid}  - IMDb id (empty unless the match came from OMDb/IMDb)
+
+    See TOKENS above for the complete list — it is the single source the API,
+    the Settings palette and the README table all read.
     """
 
     # Pre-compute derived bindings

@@ -156,6 +156,20 @@ class TMDbClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_tv_external_ids(self, tv_id: int) -> dict:
+        """A show's ids on other databases: ``{'imdb_id': 'tt0903747', …}``.
+
+        TMDb keeps these off the main /tv record, which is why series matches
+        carried an empty {imdbid} while films had one — the id was simply never
+        asked for. Empty dict when no key is configured, mirroring the other
+        calls here.
+        """
+        if not self.enabled:
+            return {}
+        resp = await self._client.get(f"/tv/{int(tv_id)}/external_ids")
+        resp.raise_for_status()
+        return resp.json()
+
     async def get_movie_details(self, movie_id: int) -> dict:
         resp = await self._client.get(f"/movie/{movie_id}")
         resp.raise_for_status()

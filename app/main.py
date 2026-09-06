@@ -27,24 +27,31 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, field_validator
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, field_validator, model_validator
 
+from app import __version__
 from app.core.detector import (
-    detect, MediaType, is_video_file, is_subtitle_file,
+    detect, MediaType, is_video_file, is_subtitle_file, is_sample_or_extra,
     VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, AUDIO_EXTENSIONS,
-    extract_subtitle_lang_tag,
+    extract_subtitle_lang_tag, normalize_subtitle_tag,
 )
 from app.core.matcher import (
     cascade_score, cascade_breakdown, name_similarity, normalize, METRIC_LABELS,
 )
 from app.core.formatter import (
-    apply_template, build_new_path, TEMPLATES, sanitize_filename, truncate_component,
+    apply_template, build_new_path, TEMPLATES, TOKENS, sanitize_filename,
+    truncate_component, unknown_tokens,
 )
 from app.core.renamer import execute_rename, RenameAction, RenameResult
 from app.core.history import history, HistoryEntry, _prune_empty_dirs, _common_ancestor
 from app.core.config import load_config, save_config, read_config_status, read_file_keys, config_file
 from app.core.watches import load_watches, save_watches
+from app.core.prefs import load_prefs, save_prefs, MAX_CUSTOM_PRESETS
+from app.core.aliases import (
+    alias_key, forget_alias, load_aliases, save_alias,
+)
+from app.core.sidecar import write_sidecars_for
 from app.api.tmdb import TMDbClient
 from app.api.tvmaze import TVMazeClient
 from app.api.omdb import OMDbClient
@@ -52,15 +59,30 @@ from app.api.musicbrainz import MusicBrainzClient
 from app.api.retry import with_retry
 from app.core.cache import cached, provider_cache
 from datetime import datetime, timedelta
+import csv
+import io
+import shutil
 import uuid
 
 # ── Load user config (deb/AppImage: ~/.config/cinesort/keys.env) ─────────────
 # Must happen BEFORE API clients are instantiated so os.environ is populated.
 # Docker users: their env vars are already set; load_config() won't overwrite them.
+#
+# Snapshot which tuning knobs the ENVIRONMENT supplied, before load_config()
+# fills the rest in from keys.env. After that call the two are indistinguishable
+# — os.environ holds both — and the difference matters: an env var wins again on
+# every restart, so a Settings edit to one is saved but never takes effect. The
+# UI needs to say that rather than present a field that silently does nothing.
+_ENV_SUPPLIED_TUNING = frozenset(
+    name for name in ("CINESORT_LOW_CONFIDENCE", "CINESORT_REVIEW_CONFIDENCE",
+                      "CINESORT_WATCH_INTERVAL", "CINESORT_CACHE_TTL")
+    if os.environ.get(name)
+)
+
 load_config()
 
 
-app = FastAPI(title="CineSort", version="1.5.1")
+app = FastAPI(title="CineSort", version=__version__)
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -93,7 +115,15 @@ mb = MusicBrainzClient()   # keyless; throttled to 1 req/s per MusicBrainz terms
 # GET /api/match-progress. A single module-level dict is deliberate: the UI
 # serializes matches (the Match button is disabled while one runs), so at most
 # one match is in flight per instance and no locking is needed.
-match_progress = {"active": False, "current": 0, "total": 0, "group": "", "files": 0, "started": 0.0}
+match_progress = {"active": False, "current": 0, "total": 0, "group": "", "files": 0,
+                  "started": 0.0, "cancel_requested": False}
+
+# How many season fetches may be in flight at once. TMDb's guidance is roughly
+# 50 requests/second and the retry policy already backs off, so 6 is
+# comfortably conservative — the point is to stop paying 39 serial round trips
+# for a long-running show, not to saturate the API. Measured on a 39-season
+# show: 4.38 s serial.
+SEASON_FETCH_CONCURRENCY = 6
 
 # Same pattern for the current /api/rename run (GET /api/rename-progress).
 # The Rename button is disabled while a run is in flight, so a single
@@ -109,7 +139,7 @@ rename_progress = {"active": False, "current": 0, "total": 0, "file": ""}
 # Docker instance leaks nothing through the unauthenticated snapshot. The
 # Scan button is disabled while a scan runs (same serialization argument as
 # above); worker-thread writes are GIL-atomic per field.
-scan_progress = {"active": False, "seen": 0, "media": 0}
+scan_progress = {"active": False, "seen": 0, "media": 0, "skipped": 0, "cancel_requested": False}
 
 
 @app.get("/")
@@ -133,6 +163,9 @@ async def logo():
 class ScanRequest(BaseModel):
     path: str
     recursive: bool = True
+    # Release samples and Extras/Featurettes folders are skipped by default:
+    # a sample matches the SAME record as its feature and collides with it.
+    include_extras: bool = False
 
     @field_validator("path")
     @classmethod
@@ -148,6 +181,7 @@ class ScanRequest(BaseModel):
 class BatchScanRequest(BaseModel):
     paths: list[str]
     recursive: bool = True   # applies to directory entries in `paths`
+    include_extras: bool = False   # see ScanRequest
 
     @field_validator("paths")
     @classmethod
@@ -217,8 +251,19 @@ class MatchRequest(BaseModel):
 
 
 class RenameRequest(BaseModel):
+    """One rename batch.
+
+    Each operation carries at least {"original", "new_path"}. When
+    `write_sidecars` is set it may also carry "metadata" (the match result's
+    metadata dict — title/show, ids, overview, poster URL) and "is_subtitle";
+    both are optional and an operation missing them is simply renamed without
+    sidecars.
+    """
     operations: list[dict]
     action: str = "test"
+    # Kodi/Jellyfin .nfo + poster beside each renamed file. Off by default:
+    # it writes extra files into the user's library and fetches poster art.
+    write_sidecars: bool = False
 
     @field_validator("action")
     @classmethod
@@ -240,6 +285,50 @@ class SettingsRequest(BaseModel):
     tmdb_language: str = ""
     clear_tmdb: bool = False   # explicit "Remove key" from the Settings UI
     clear_omdb: bool = False
+
+    # Runtime tuning. None = leave unchanged, so a Settings save that only
+    # touches an API key cannot silently rewrite a threshold.
+    low_confidence: Optional[float] = None
+    review_confidence: Optional[float] = None
+    watch_interval: Optional[int] = None
+    cache_ttl: Optional[int] = None
+    # Desktop only: keep the backend (and its watch loop) alive when the window
+    # is closed. Stored server-side so the Electron shell and the page agree on
+    # one value, the same way every other preference works.
+    keep_in_tray: Optional[bool] = None
+
+    @field_validator("low_confidence", "review_confidence")
+    @classmethod
+    def validate_threshold(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not 0.0 <= v <= 1.0:
+            raise ValueError("Confidence thresholds must be between 0 and 1.")
+        return v
+
+    @field_validator("watch_interval")
+    @classmethod
+    def validate_interval(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 10:
+            raise ValueError("Watch interval must be at least 10 seconds.")
+        return v
+
+    @field_validator("cache_ttl")
+    @classmethod
+    def validate_ttl(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("Cache TTL cannot be negative.")
+        return v
+
+    @model_validator(mode="after")
+    def validate_threshold_order(self):
+        """Low must stay below review. Inverted, the UI would mark every match
+        both "weak" and "auto-renameable" — the gate would read as broken
+        rather than misconfigured."""
+        low = self.low_confidence
+        review = self.review_confidence
+        if low is not None and review is not None and low >= review:
+            raise ValueError(
+                "The low-confidence threshold must be below the review threshold.")
+        return self
 
     @field_validator("tmdb_key", "omdb_key")
     @classmethod
@@ -287,6 +376,7 @@ def _file_entry(p: Path) -> dict:
         "codec": det.codec,
         "audio": det.audio,
         "edition": det.edition,
+        "part": det.part,
         # Music-only fields (None for video/subtitles)
         "artist": det.artist,
         "album": det.album,
@@ -308,10 +398,21 @@ def _natural_key(p: Path):
     return [int(t) if t.isdigit() else t.lower() for t in _NAT_RE.split(str(p))]
 
 
-def _scan_dir_sync(path: str, recursive: bool, progress: dict = None) -> dict:
+class ScanCancelled(Exception):
+    """Raised out of a filesystem walk the user asked to stop.
+
+    A partial listing is discarded rather than returned: half a folder
+    presented as the whole folder is worse than no answer, because the next
+    thing the user does is press Match on it.
+    """
+
+
+def _scan_dir_sync(path: str, recursive: bool, progress: dict = None,
+                   include_extras: bool = False) -> dict:
     # `progress` lets the watch-folder loop count into a PRIVATE dict so a
     # background scan never perturbs the interactive snapshot/ticker.
     prog = scan_progress if progress is None else progress
+    prog.setdefault("skipped", 0)   # private dicts predate this counter
     base = Path(path)
     media_exts = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS | AUDIO_EXTENSIONS
 
@@ -321,24 +422,41 @@ def _scan_dir_sync(path: str, recursive: bool, progress: dict = None) -> dict:
     # sort-then-filter (restricting a total order commutes with filtering)
     # while sorting a much smaller list.
     if base.is_file():
+        # A file the user named explicitly is never filtered — asking for
+        # sample.mkv by name is a clear instruction.
         prog["seen"] += 1
         media = [base] if base.suffix.lower() in media_exts else []
         prog["media"] += len(media)
     else:
         media: list[Path] = []
         for p in (base.rglob("*") if recursive else base.iterdir()):
+            # A recursive walk over a NAS share takes minutes (see
+            # scan_directory) — checked per entry so a wrong root is one click
+            # to escape, not a wait.
+            if prog.get("cancel_requested"):
+                raise ScanCancelled()
             prog["seen"] += 1
-            if p.is_file() and p.suffix.lower() in media_exts:
-                media.append(p)
-                prog["media"] += 1
+            if not (p.is_file() and p.suffix.lower() in media_exts):
+                continue
+            if not include_extras and is_sample_or_extra(p, base):
+                prog["skipped"] += 1
+                continue
+            media.append(p)
+            prog["media"] += 1
         media.sort(key=_natural_key)
 
-    files = [_file_entry(p) for p in media]
-    return {"count": len(files), "files": files}
+    files = []
+    for p in media:
+        if prog.get("cancel_requested"):
+            raise ScanCancelled()
+        files.append(_file_entry(p))
+    return {"count": len(files), "files": files, "skipped": prog["skipped"]}
 
 
-def _scan_batch_sync(path_list: list[str], recursive: bool) -> dict:
+def _scan_batch_sync(path_list: list[str], recursive: bool,
+                     include_extras: bool = False) -> dict:
     media_exts = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS | AUDIO_EXTENSIONS
+    scan_progress.setdefault("skipped", 0)
     files = []
     # Overlapping inputs (a folder AND a file inside it, via multi-drop or the
     # native picker) must not list the same real file twice — a duplicate row
@@ -353,14 +471,23 @@ def _scan_batch_sync(path_list: list[str], recursive: bool) -> dict:
             # natural-sort only the media files — identical output order.
             targets = []
             for t in (p.rglob("*") if recursive else p.iterdir()):
+                if scan_progress.get("cancel_requested"):
+                    raise ScanCancelled()
                 scan_progress["seen"] += 1
-                if t.is_file() and t.suffix.lower() in media_exts:
-                    targets.append(t)
+                if not (t.is_file() and t.suffix.lower() in media_exts):
+                    continue
+                if not include_extras and is_sample_or_extra(t, p):
+                    scan_progress["skipped"] += 1
+                    continue
+                targets.append(t)
             targets.sort(key=_natural_key)
         else:
+            # Explicitly named file — see _scan_dir_sync.
             scan_progress["seen"] += 1
             targets = [p]
         for t in targets:
+            if scan_progress.get("cancel_requested"):
+                raise ScanCancelled()
             if not (t.is_file() and t.suffix.lower() in media_exts):
                 continue
             rp = str(t.resolve())
@@ -370,7 +497,7 @@ def _scan_batch_sync(path_list: list[str], recursive: bool) -> dict:
             # Post-dedupe count = the rows the user will actually get.
             scan_progress["media"] += 1
             files.append(_file_entry(t))
-    return {"count": len(files), "files": files}
+    return {"count": len(files), "files": files, "skipped": scan_progress["skipped"]}
 
 
 @app.post("/api/scan")
@@ -383,11 +510,15 @@ async def scan_directory(req: ScanRequest):
     """
     # Same wrapper shape as match_files: reset-then-finally so the UI ticker
     # can never keep showing a dead run, even when the walk raises.
-    scan_progress.update(active=True, seen=0, media=0)
+    scan_progress.update(active=True, seen=0, media=0, skipped=0, cancel_requested=False)
     try:
-        return await asyncio.to_thread(_scan_dir_sync, req.path, req.recursive)
+        return await asyncio.to_thread(_scan_dir_sync, req.path, req.recursive,
+                                       None, req.include_extras)
+    except ScanCancelled:
+        return {"count": 0, "files": [], "skipped": 0, "cancelled": True}
     finally:
         scan_progress["active"] = False
+        scan_progress["cancel_requested"] = False
 
 
 @app.post("/api/scan-batch")
@@ -398,11 +529,15 @@ async def scan_batch(req: BatchScanRequest):
     directory entries — previously it always crawled the full tree, ignoring
     the UI's "Include subfolders" toggle.
     """
-    scan_progress.update(active=True, seen=0, media=0)
+    scan_progress.update(active=True, seen=0, media=0, skipped=0, cancel_requested=False)
     try:
-        return await asyncio.to_thread(_scan_batch_sync, req.paths, req.recursive)
+        return await asyncio.to_thread(_scan_batch_sync, req.paths, req.recursive,
+                                       req.include_extras)
+    except ScanCancelled:
+        return {"count": 0, "files": [], "skipped": 0, "cancelled": True}
     finally:
         scan_progress["active"] = False
+        scan_progress["cancel_requested"] = False
 
 
 # ─── Browse Endpoint ───────────────────────────────────────────────────
@@ -561,6 +696,72 @@ async def browse_directory(path: str = Query("")):
 
 # ─── Search Endpoint ───────────────────────────────────────────────────
 
+async def _tvmaze_by_imdb(imdb_id: str):
+    """TVmaze's show for a tt-ID, or None.
+
+    Network and provider failures are swallowed — this is a fallback. A
+    MALFORMED id is not: that is the caller's mistake and deserves a 400
+    rather than a silent "not found".
+    """
+    try:
+        return await cached(("tvmaze", "lookup_imdb", imdb_id),
+                            lambda: with_retry(lambda: tvmaze.lookup_by_imdb(imdb_id)))
+    except ValueError:
+        raise
+    except Exception as exc:
+        print(f"[WARN] TVmaze IMDb lookup failed for {imdb_id!r}: {_sanitize_error(exc)}")
+        return None
+
+
+async def _imdb_lookup_without_omdb(imdb_id: str) -> Optional[dict]:
+    """Resolve a tt-ID using whatever provider this deployment does have.
+
+    TMDb first (it answers for films as well as shows), then TVmaze (keyless,
+    series only). Returns a search-result entry, or None when neither knows it.
+    """
+    if tmdb.enabled:
+        try:
+            found = await tmdb.find_by_imdb_id(imdb_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            print(f"[WARN] TMDb /find failed for {imdb_id!r}: {_sanitize_error(exc)}")
+            found = {}
+        for key, kind in (("tv_results", "tv"), ("movie_results", "movie")):
+            hits = found.get(key) or []
+            if hits:
+                hit = hits[0]
+                date = hit.get("first_air_date") or hit.get("release_date") or ""
+                return {
+                    "id": imdb_id,
+                    "title": hit.get("name") or hit.get("title") or "",
+                    "year": int(date[:4]) if date[:4].isdigit() else None,
+                    "overview": _short_overview(hit.get("overview")),
+                    "poster": (f"https://image.tmdb.org/t/p/w154{hit['poster_path']}"
+                               if hit.get("poster_path") else None),
+                    "type": kind,
+                    "datasource": "tmdb",
+                    "tmdb_id": hit.get("id"),
+                }
+
+    try:
+        show = await _tvmaze_by_imdb(imdb_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if show is None:
+        return None
+    return {
+        "id": imdb_id,
+        "title": show.name,
+        "year": show.year,
+        "overview": _short_overview(show.summary),
+        "poster": show.image_url,
+        "type": "tv",
+        "datasource": "tvmaze",
+        "tvmaze_id": show.id,
+    }
+
+
 @app.get("/api/search")
 async def search_metadata(
     q: str = Query(..., min_length=1),
@@ -583,13 +784,22 @@ async def search_metadata(
     results = []
 
     if imdb_id:
+        wanted = imdb_id.strip()
         if not omdb.enabled:
-            raise HTTPException(
-                status_code=503,
-                detail="IMDb-ID lookup needs an OMDb key. Add it in Settings.",
-            )
+            # OMDb is the richest answer but not the only one: TVmaze resolves
+            # a series tt-ID with no key at all, and TMDb resolves both with
+            # the key the user already has. Refusing outright made the feature
+            # unreachable for every deployment that simply has no OMDb key.
+            entry = await _imdb_lookup_without_omdb(wanted)
+            if entry is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=("No TV show or film found for that IMDb ID. "
+                            "Adding an OMDb key in Settings widens the search."),
+                )
+            return {"results": [entry]}
         try:
-            r = await omdb.get_by_imdb_id(imdb_id.strip())
+            r = await omdb.get_by_imdb_id(wanted)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         if r:
@@ -615,18 +825,26 @@ async def search_metadata(
             # TMDb doesn't carry) the OMDb-only entry is still returned and
             # the UI explains why that one can't be renamed — a partial answer
             # beats a 500.
-            if r.media_type == "series" and tmdb.enabled:
-                try:
-                    found = (await tmdb.find_by_imdb_id(
-                        imdb_id.strip())).get("tv_results") or []
-                    if found:
+            if r.media_type == "series":
+                if tmdb.enabled:
+                    try:
+                        found = (await tmdb.find_by_imdb_id(
+                            wanted)).get("tv_results") or []
+                        if found:
+                            entry["type"] = "tv"
+                            entry["tmdb_id"] = found[0]["id"]
+                    except Exception as exc:
+                        # Sanitized: TMDb errors embed the request URL, which
+                        # carries ?api_key= — it must never reach a log users share.
+                        print(f"[WARN] TMDb /find failed for {imdb_id!r}: "
+                              f"{_sanitize_error(exc)}")
+                if "tmdb_id" not in entry:
+                    # TVmaze is keyless, so it answers where TMDb could not.
+                    # OMDb already validated the id to get here.
+                    show = await _tvmaze_by_imdb(wanted)
+                    if show is not None:
                         entry["type"] = "tv"
-                        entry["tmdb_id"] = found[0]["id"]
-                except Exception as exc:
-                    # Sanitized: TMDb errors embed the request URL, which
-                    # carries ?api_key= — it must never reach a log users share.
-                    print(f"[WARN] TMDb /find failed for {imdb_id!r}: "
-                          f"{_sanitize_error(exc)}")
+                        entry["tvmaze_id"] = show.id
             results.append(entry)
         return {"results": results}
 
@@ -702,8 +920,20 @@ def _threshold_env(name: str, default: float) -> float:
     return max(0.0, min(1.0, v))
 
 
-LOW_CONFIDENCE_THRESHOLD = _threshold_env("CINESORT_LOW_CONFIDENCE", 0.4)
-REVIEW_CONFIDENCE_THRESHOLD = _threshold_env("CINESORT_REVIEW_CONFIDENCE", 0.6)
+# The knobs the Settings "Matching & performance" card owns.
+TUNING_KEYS = ("CINESORT_LOW_CONFIDENCE", "CINESORT_REVIEW_CONFIDENCE",
+               "CINESORT_WATCH_INTERVAL", "CINESORT_CACHE_TTL")
+
+DEFAULT_LOW_CONFIDENCE = 0.4
+DEFAULT_REVIEW_CONFIDENCE = 0.6
+
+
+def _thresholds() -> tuple[float, float]:
+    """(low, review), read live so a Settings change applies to the NEXT match
+    instead of the next restart — which on a desktop package is the only way
+    to change them at all (a .desktop launcher passes no environment)."""
+    return (_threshold_env("CINESORT_LOW_CONFIDENCE", DEFAULT_LOW_CONFIDENCE),
+            _threshold_env("CINESORT_REVIEW_CONFIDENCE", DEFAULT_REVIEW_CONFIDENCE))
 
 
 def _query_variants(name: str, year: Optional[int]) -> list[tuple[str, Optional[int]]]:
@@ -782,6 +1012,49 @@ def _disambiguate_by_year(shows: list, year: Optional[int]) -> list:
         return shows
     matches = [s for s in shows if getattr(s, "year", None) == year]
     return matches if len(matches) == 1 else shows
+
+
+# TMDb keeps a film's collection and its IMDb id on the /movie record, not on
+# search results — so reading either costs one extra request per film (measured
+# ~91 ms against a ~142 ms search, i.e. +64% on a movie batch). It is fetched
+# only when the template actually asks for one of them: a user on the default
+# Film preset pays nothing for a token they never typed.
+_TMDB_DETAIL_TOKENS = ("{collection", "{imdbid}")
+
+
+def _template_needs_movie_details(template: str) -> bool:
+    return any(token in (template or "") for token in _TMDB_DETAIL_TOKENS)
+
+
+async def _tmdb_movie_details(movie_id) -> dict:
+    """A film's full TMDb record, or {} on any failure.
+
+    Same cache key the exact-pick path uses, so a pinned match pays nothing.
+    Non-fatal: these fields are template conveniences and must never be able to
+    fail a match that already succeeded.
+    """
+    try:
+        return await cached(
+            ("tmdb", "movie", int(movie_id)),
+            lambda: with_retry(lambda: tmdb.get_movie_details(int(movie_id)))) or {}
+    except Exception:
+        return {}
+
+
+async def _tmdb_imdb_id(tv_id: int) -> Optional[str]:
+    """A show's IMDb id from TMDb, or None.
+
+    Cached like every other provider call, and non-fatal by design: the id is a
+    template convenience, and failing a whole match because an extra lookup
+    timed out would trade a real feature for a cosmetic one.
+    """
+    try:
+        external = await cached(
+            ("tmdb", "external_ids", tv_id),
+            lambda: with_retry(lambda: tmdb.get_tv_external_ids(tv_id)))
+        return (external or {}).get("imdb_id") or None
+    except Exception:
+        return None
 
 
 def _index_episodes(episodes_data: list[dict]) -> tuple[dict, dict, dict]:
@@ -867,6 +1140,52 @@ def _range_title(best_ep: dict, e_end, se_index: dict) -> str:
     return f"{titles[0]}, {titles[1]} & {len(titles) - 2} more"
 
 
+async def _fetch_seasons(show_id: int, seasons: list) -> tuple[list, dict]:
+    """Every season's episodes, fetched concurrently. Returns (episodes, failures).
+
+    Identical output to the serial loop it replaces: the same cache keys, the
+    same episode dicts, in the same order as `seasons`, and per-season failures
+    isolated so one bad season cannot lose the rest of the show (or, via
+    gather's default, cancel its siblings).
+    """
+    # Duplicate season numbers would issue two concurrent fetches for one cache
+    # key — harmless but wasted. `seasons` entries missing "season_number" all
+    # collapse to 0, which is exactly when that happens.
+    ordered: list[int] = []
+    for entry in seasons:
+        number = entry.get("season_number", 0)
+        if number not in ordered:
+            ordered.append(number)
+
+    limit = asyncio.Semaphore(SEASON_FETCH_CONCURRENCY)
+
+    async def fetch(number: int):
+        async with limit:
+            try:
+                return number, await cached(
+                    ("tmdb", "season", show_id, number),
+                    lambda: with_retry(lambda: tmdb.get_tv_season(show_id, number))), None
+            except Exception as exc:
+                return number, [], exc
+
+    fetched = await asyncio.gather(*(fetch(number) for number in ordered))
+
+    episodes: list = []
+    failures: dict = {}
+    for number, eps, exc in fetched:
+        if exc is not None:
+            failures[number] = _sanitize_error(exc)
+            continue
+        episodes.extend([
+            {"season": e.season, "episode": e.episode, "title": e.title,
+             "air_date": e.air_date,
+             "overview": _short_overview(getattr(e, "overview", None)
+                                         or getattr(e, "summary", None))}
+            for e in eps
+        ])
+    return episodes, failures
+
+
 async def _find_series(datasource: str, group_name: str, year, source_errors: dict):
     """Search ONE TV source for a series and download its episode list.
 
@@ -909,7 +1228,8 @@ async def _find_series(datasource: str, group_name: str, year, source_errors: di
             }
         elif shows:
             show = shows[0]
-            show_data = {"id": show.id, "name": show.name, "year": show.year, "poster": show.image_url}
+            show_data = {"id": show.id, "name": show.name, "year": show.year,
+                         "poster": show.image_url, "imdb_id": show.imdb_id}
             try:
                 eps = await cached(
                     ("tvmaze", "episodes", show.id),
@@ -945,25 +1265,16 @@ async def _find_series(datasource: str, group_name: str, year, source_errors: di
             }
         elif shows:
             show = shows[0]
-            show_data = {"id": show.id, "name": show.title, "year": show.year, "poster": show.poster_url_small}
+            show_data = {"id": show.id, "name": show.title, "year": show.year,
+                         "poster": show.poster_url_small,
+                         "imdb_id": await _tmdb_imdb_id(show.id)}
             # Fetch all seasons
             details = await cached(
                 ("tmdb", "details", show.id),
                 lambda: with_retry(lambda: tmdb.get_tv_details(show.id)))
-            seasons = details.get("seasons", [])
-            for s in seasons:
-                sn = s.get("season_number", 0)
-                try:
-                    eps = await cached(
-                        ("tmdb", "season", show.id, sn),
-                        lambda: with_retry(lambda: tmdb.get_tv_season(show.id, sn)))
-                    episodes_data.extend([
-                        {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date,
-                 "overview": _short_overview(getattr(e, "overview", None) or getattr(e, "summary", None))}
-                        for e in eps
-                    ])
-                except Exception as exc:
-                    failed_seasons[sn] = _sanitize_error(exc)
+            eps, failed = await _fetch_seasons(show.id, details.get("seasons", []))
+            episodes_data.extend(eps)
+            failed_seasons.update(failed)
 
     return show_data, episodes_data, failed_seasons, episodes_fetch_error, None
 
@@ -977,10 +1288,35 @@ async def match_files(req: MatchRequest):
     Thin wrapper so the progress snapshot is ALWAYS reset — the impl has an
     early return (needs_selection) and can raise; the finally covers both.
     """
+    # Cleared on the way IN, not only on the way out: a cancel POST that lands
+    # just after a run finishes would otherwise sit in the flag and abort the
+    # NEXT match before it started.
+    match_progress["cancel_requested"] = False
     try:
         return await _match_files_impl(req)
     finally:
         match_progress["active"] = False
+        match_progress["cancel_requested"] = False
+
+
+@app.post("/api/match-cancel")
+async def cancel_match():
+    """Ask the running match to stop at the next group boundary.
+
+    Cooperative, not a kill: the group in flight finishes so its results are
+    kept, and everything already matched stays. Nothing is written to disk by a
+    match, so there is no partial state to clean up.
+    """
+    match_progress["cancel_requested"] = True
+    return {"ok": True, "active": match_progress["active"]}
+
+
+@app.post("/api/scan-cancel")
+async def cancel_scan():
+    """Ask the running filesystem walk to stop. A partial listing is discarded
+    rather than presented as a complete one."""
+    scan_progress["cancel_requested"] = True
+    return {"ok": True, "active": scan_progress["active"]}
 
 
 @app.get("/api/match-progress")
@@ -999,6 +1335,164 @@ async def get_rename_progress():
 async def get_scan_progress():
     """Live snapshot of the running scan (see scan_progress above)."""
     return scan_progress
+
+
+def _quality_of_result(result: dict, scanned: Optional[dict]) -> dict:
+    """What the UI needs to compare the incoming file against what is on disk.
+
+    Read from the SCAN payload, which already carried all of it — the match
+    result does not, and re-detecting would be work the app already did.
+    """
+    scanned = scanned or {}
+    return {
+        "size": scanned.get("size"),
+        "video_format": scanned.get("video_format"),
+        "source": scanned.get("source"),
+        "codec": scanned.get("codec"),
+    }
+
+
+def _quality_on_disk(path: Path) -> dict:
+    """The same fields for a file already in the library. Best-effort: a stat()
+    can raise on a broken mount or an over-long path, and losing the WHOLE
+    match to decorate one conflict would repeat the ENAMETOOLONG bug."""
+    info: dict = {"size": None, "video_format": None, "source": None, "codec": None}
+    try:
+        info["size"] = path.stat().st_size
+    except OSError:
+        return info
+    try:
+        detected = detect(path)
+        info.update(video_format=detected.video_format, source=detected.source,
+                    codec=detected.codec)
+    except Exception:
+        pass
+    return info
+
+
+def _pair_subtitles(subtitle_files: list, video_files: list, results: list) -> list:
+    """Pair each subtitle to a matched video in the same batch and append its
+    result. Returns the subtitles that found no companion, for the caller to
+    match on their own.
+
+    Appends to `results` in place — the paired path is unchanged from when this
+    lived inline, so mixed batches produce byte-identical names.
+    """
+    unpaired: list = []
+    # Build a lookup from each matched video's original stem → its new_path stem.
+    # A subtitle companion is identified by sharing the same stem (ignoring any
+    # trailing language tag such as ".en" or ".forced.en").
+    video_stem_map: dict[str, dict] = {}
+    # Detection fallback for stem misses: subtitles downloaded from a
+    # different release never share the video's stem, but the scanner ran
+    # full detection on them too — pair on (normalized clean_name, season,
+    # episode). Values are LISTS so quality doubles claiming the same SxE
+    # can be detected and refused instead of guessed.
+    video_se_map: dict[tuple, list] = {}
+    vf_by_path = {f["path"]: f for f in video_files}
+    for r in results:
+        if r.get("matched") and r.get("new_path"):
+            orig_stem = Path(r["original"]).stem.lower()
+            video_stem_map[orig_stem] = r
+            f = vf_by_path.get(r["original"])
+            # Music results also land here matched — their season is None,
+            # so the SxE index stays videos-only by construction.
+            if f and f.get("season") is not None and f.get("episode") is not None:
+                key = (normalize(f.get("clean_name") or ""), f["season"], f["episode"])
+                video_se_map.setdefault(key, []).append(r)
+
+    for sf in subtitle_files:
+        sub_path = Path(sf["path"])
+        sub_ext = sub_path.suffix.lower()
+        # Two forms, deliberately: the RAW tag is what sits on disk, so it is
+        # what the stem slice below must remove; the normalized one is what the
+        # renamed file gets (".eng"/".English" both become ".en", which is the
+        # code Plex and Jellyfin index on).
+        raw_tag = extract_subtitle_lang_tag(sub_path)
+        lang_tag = normalize_subtitle_tag(raw_tag)
+        # The "clean" stem is the subtitle stem with the lang tag stripped
+        sub_stem_full = sub_path.stem  # e.g. "Show.S01E01.en"
+        if raw_tag:
+            # strip the lang tag suffix from the stem
+            clean_stem = sub_stem_full[: len(sub_stem_full) - len(raw_tag)]
+        else:
+            clean_stem = sub_stem_full
+
+        # Exact stem match first — it is certain. Detection fallback only
+        # fills stem MISSES, so pre-F27 pairings are byte-identical.
+        companion = video_stem_map.get(clean_stem.lower())
+        ambiguous_se = None
+        if companion is None and sf.get("season") is not None and sf.get("episode") is not None:
+            candidates = video_se_map.get(
+                (normalize(sf.get("clean_name") or ""), sf["season"], sf["episode"]), []
+            )
+            if len(candidates) == 1:
+                companion = candidates[0]
+            elif len(candidates) > 1:
+                ambiguous_se = (sf["season"], sf["episode"])
+
+        if companion:
+            # Derive new subtitle path from the companion video's new_path
+            companion_new = Path(companion["new_path"])
+            # The video's name is already truncated to the filesystem limit by
+            # build_new_path, but a subtitle appends MORE to that stem
+            # (".en" + ".srt"), which pushes it back over. This name is built
+            # by concatenation and never passes through build_new_path, so it
+            # needs the same byte budget applied explicitly — otherwise the
+            # over-long path makes Path.exists() raise ENAMETOOLONG in the
+            # conflict scan below and 500s the WHOLE match, not just this file.
+            new_sub_name = truncate_component(
+                companion_new.stem,
+                reserve=len((lang_tag + sub_ext).encode("utf-8")),
+            ) + lang_tag + sub_ext
+            new_sub_path = companion_new.parent / new_sub_name
+            results.append({
+                "original": sf["path"],
+                "filename": sf["filename"],
+                "new_path": str(new_sub_path),
+                "new_name": new_sub_name,
+                "preview": new_sub_name,
+                "score": companion["score"],
+                "matched": True,
+                # Inherit the companion's pinned flag along with its score.
+                # A subtitle carries no evidence of its own — it is renamed
+                # BECAUSE its video was. Without this the frontend's
+                # confidence gate keeps a pinned low-score video selected but
+                # drops its subtitle, renaming the video and orphaning the
+                # .srt beside it under the old name.
+                "pinned": companion.get("pinned", False),
+                "metadata": companion.get("metadata"),
+                "is_subtitle": True,
+            })
+        else:
+            # No companion video matched — skip (do not rename). Ambiguity
+            # gets its own truthful reason: renaming against the wrong
+            # quality double would be a guess.
+            if ambiguous_se:
+                s, e = ambiguous_se
+                reason = (
+                    f"Subtitle skipped — multiple videos match "
+                    f"S{s:02d}E{e:02d}; rename manually"
+                )
+                results.append({
+                    "original": sf["path"],
+                    "filename": sf["filename"],
+                    "new_path": None,
+                    "new_name": None,
+                    "preview": None,
+                    "score": 0,
+                    "matched": False,
+                    "is_subtitle": True,
+                    "reason": reason,
+                })
+            else:
+                # No companion in this batch. The scanner ran full detection on
+                # this file too, so it can be matched on its own rather than
+                # abandoned — the caller runs it through the same pipeline.
+                unpaired.append(sf)
+
+
+    return unpaired
 
 
 async def _match_files_impl(req: MatchRequest, progress: dict = None):
@@ -1065,6 +1559,11 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
             else TEMPLATES["music"]
         )
         for f in music_files:
+            # MusicBrainz is throttled to 1 req/s BY DESIGN, so a 500-track
+            # batch is >8 minutes — the single most important place to be able
+            # to stop.
+            if prog.get("cancel_requested"):
+                break
             prog["current"] += 1
             prog["group"] = f.get("clean_name") or f["filename"]
             prog["files"] = 1
@@ -1098,9 +1597,20 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                 # Prefer the track number parsed from the filename — the
                 # first-release mapping from MusicBrainz is a weaker guess.
                 track = f.get("track") or best.track_no
+                # Whose album name wins. MusicBrainz's top recording is often
+                # a live set or a compilation that merely CONTAINS the track —
+                # album_is_studio says so — and overwriting the folder the user
+                # ripped into with a live-set title (or the Unknown fallback) loses
+                # information the app already had. A studio release still wins:
+                # it is the canonical spelling.
+                folder_artist = f.get("artist")
+                folder_album = f.get("album")
+                trust_provider = bool(best.album and best.album_is_studio)
                 bindings = {
-                    "artist": best.artist or f.get("artist") or "Unknown Artist",
-                    "album": best.album or "Unknown Album",
+                    "artist": (best.artist if trust_provider else
+                               folder_artist or best.artist) or "Unknown Artist",
+                    "album": (best.album if trust_provider else
+                              folder_album or best.album) or "Unknown Album",
                     "track": str(track or 0).zfill(2),
                     "title": best.title,
                     "y": best.year or "",
@@ -1148,7 +1658,35 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                     "reason": reason,
                 })
 
-    for group_name, group_files in groups.items():
+    # Two rounds. Round one matches the video groups; the subtitle pairing pass
+    # then runs, and whatever it could not pair becomes round two — matched by
+    # the SAME code below, because a subtitle carries the same detection
+    # payload a video does (the scanner ran detect() on it too). Nothing in the
+    # loop body needs to know which round it is in.
+    pending = list(groups.items())
+    subtitle_round_done = False
+    while True:
+        if not pending:
+            if subtitle_round_done:
+                break
+            subtitle_round_done = True
+            # Pairing is local and cheap, so it still runs — it is what gives
+            # already-matched videos their subtitles. Matching the leftovers is
+            # more provider work, which a cancel has just asked us not to do.
+            unpaired = _pair_subtitles(subtitle_files, video_files, results)
+            if prog.get("cancel_requested"):
+                break
+            orphan_groups: dict[str, list[dict]] = {}
+            for f in unpaired:
+                orphan_groups.setdefault(f.get("clean_name", "unknown"), []).append(f)
+            pending = list(orphan_groups.items())
+            prog["total"] += len(pending)
+            continue
+
+        if prog.get("cancel_requested"):
+            break
+
+        group_name, group_files = pending.pop(0)
         prog["current"] += 1
         prog["group"] = group_name
         prog["files"] = len(group_files)
@@ -1168,6 +1706,26 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
         media_type = sample.get("media_type", "unknown")
         year = sample.get("year")
 
+        # A remembered pick for this exact title, if the user ever made one.
+        alias = load_aliases().get(alias_key(group_name))
+
+        # An explicit id pick outranks detection. Routing on media_type alone
+        # discarded the override in the ONE case it exists for: detection got
+        # the type wrong (a folder named "Deep4K" made every film inside it a
+        # series), and picking the right record by id is the user's recovery.
+        # A request carries at most one of the two — selectShow() and
+        # selectMovie() are separate calls with separate bodies, each scoped to
+        # the file or detection group the user picked for.
+        #
+        # A remembered pick outranks detection for the same reason, one rung
+        # lower: it IS a pick, just an older one, so a live choice still wins.
+        if req.selected_movie_id and req.selected_movie_source:
+            media_type = "movie"
+        elif req.selected_show_id and req.selected_show_name:
+            media_type = "series"
+        elif alias:
+            media_type = alias["media"]
+
         # Search for metadata
         show_data = None
         episodes_data = []
@@ -1182,18 +1740,30 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
         fallback_tried: Optional[str] = None
 
         if media_type == "series":
-            # Check if user already selected a specific show
-            if req.selected_show_id and req.selected_show_name:
+            # The show to fetch by id: whatever this request picked, or the
+            # pick the user made last time. `pick_source` is the provider the
+            # ID BELONGS TO, which after an alias hit can differ from the
+            # request's datasource — emitting a TVmaze id as {tmdbid} is the
+            # F13 bug, so it is tracked separately all the way to the bindings.
+            pick_show_id = req.selected_show_id
+            pick_show_name = req.selected_show_name
+            pick_source = req.datasource if req.selected_show_id else None
+            if not pick_show_id and alias and alias["media"] == "series":
+                pick_show_id = alias["id"]
+                pick_show_name = alias["name"]
+                pick_source = alias["datasource"]
+
+            if pick_show_id and pick_show_name:
                 # Use the pre-selected show
-                if req.datasource == "tvmaze":
+                if pick_source == "tvmaze":
                     show_details = await cached(
-                        ("tvmaze", "show", req.selected_show_id),
-                        lambda: with_retry(lambda: tvmaze.get_show(req.selected_show_id)))
-                    show_data = {"id": show_details.id, "name": show_details.name, "year": show_details.year, "poster": show_details.image_url}
+                        ("tvmaze", "show", pick_show_id),
+                        lambda: with_retry(lambda: tvmaze.get_show(pick_show_id)))
+                    show_data = {"id": show_details.id, "name": show_details.name, "year": show_details.year, "poster": show_details.image_url, "source": "tvmaze", "imdb_id": show_details.imdb_id}
                     try:
                         eps = await cached(
-                            ("tvmaze", "episodes", req.selected_show_id),
-                            lambda: with_retry(lambda: tvmaze.get_episodes(req.selected_show_id)))
+                            ("tvmaze", "episodes", pick_show_id),
+                            lambda: with_retry(lambda: tvmaze.get_episodes(pick_show_id)))
                     except Exception as exc:
                         episodes_fetch_error = _sanitize_error(exc)
                         eps = []
@@ -1204,8 +1774,8 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                     ]
                 else:
                     show_details = await cached(
-                        ("tmdb", "details", req.selected_show_id),
-                        lambda: with_retry(lambda: tmdb.get_tv_details(req.selected_show_id)))
+                        ("tmdb", "details", pick_show_id),
+                        lambda: with_retry(lambda: tmdb.get_tv_details(pick_show_id)))
                     # int, not str: every other producer of show_data["year"]
                     # (TMDbResult.year, TVMazeShow.year) is an int, and the
                     # scoring metrics subtract it from the file's year. A
@@ -1215,21 +1785,28 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                     # flow doing its job.
                     _first_air = show_details.get("first_air_date") or ""
                     _show_year = int(_first_air[:4]) if _first_air[:4].isdigit() else None
-                    show_data = {"id": req.selected_show_id, "name": show_details.get("name"), "year": _show_year, "poster": f"https://image.tmdb.org/t/p/w154{show_details.get('poster_path')}" if show_details.get("poster_path") else None}
-                    seasons = show_details.get("seasons", [])
-                    for s in seasons:
-                        sn = s.get("season_number", 0)
-                        try:
-                            eps = await cached(
-                                ("tmdb", "season", req.selected_show_id, sn),
-                                lambda: with_retry(lambda: tmdb.get_tv_season(req.selected_show_id, sn)))
-                            episodes_data.extend([
-                                {"season": e.season, "episode": e.episode, "title": e.title, "air_date": e.air_date,
-                 "overview": _short_overview(getattr(e, "overview", None) or getattr(e, "summary", None))}
-                                for e in eps
-                            ])
-                        except Exception as exc:
-                            failed_seasons[sn] = _sanitize_error(exc)
+                    show_data = {"id": pick_show_id, "name": show_details.get("name"), "year": _show_year, "poster": f"https://image.tmdb.org/t/p/w154{show_details.get('poster_path')}" if show_details.get("poster_path") else None, "source": "tmdb", "imdb_id": await _tmdb_imdb_id(pick_show_id)}
+                    eps, failed = await _fetch_seasons(
+                        pick_show_id, show_details.get("seasons", []))
+                    episodes_data.extend(eps)
+                    failed_seasons.update(failed)
+
+                # Remember the pick — but only a pick this request actually
+                # carried. Re-saving an alias hit would rewrite its timestamp
+                # on every match and, worse, make a wrong alias self-renewing.
+                if req.selected_show_id and show_data and show_data.get("name"):
+                    save_alias(group_name, {
+                        "media": "series",
+                        "datasource": pick_source,
+                        "id": show_data["id"],
+                        "name": show_data["name"],
+                        "year": show_data.get("year"),
+                    })
+                    # Files a watch rule already held as "ambiguous" are in its
+                    # done-set for the life of the process; clear it so the very
+                    # next cycle acts on them, which is what "pick it once and
+                    # it stays automatic" has to mean.
+                    _watch_state.clear()
             else:
                 # Search the selected source (progressively-trimmed queries,
                 # multi-match check). When it yields NOTHING — zero results or
@@ -1265,7 +1842,9 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
             # wins, matching the _cascade_search convention above). Attribute
             # them to the source that actually served this show — the
             # fallback's failures are not the primary's.
-            eff_source = (show_data or {}).get("fallback_source") or req.datasource
+            eff_source = ((show_data or {}).get("fallback_source")
+                          or (show_data or {}).get("source")
+                          or req.datasource)
             if failed_seasons:
                 first_sn = sorted(failed_seasons)[0]
                 source_errors.setdefault(
@@ -1355,18 +1934,32 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                         "e_end": f.get("episode_end"),
                         "t": _range_title(best_ep, f.get("episode_end"), se_index),
                         "d": best_ep.get("air_date", ""),
+                        # The file's own absolute number is how anime releases
+                        # are numbered; the provider's is a computed ordinal.
+                        # Without this the Anime preset rendered {absolute} as
+                        # nothing in a real rename while the live preview —
+                        # which HAS bound it all along — promised otherwise.
+                        "absolute": f.get("absolute") or best_ep.get("absolute") or "",
                         "source": f.get("source", ""),
                         "vf": f.get("video_format", ""),
                         "group": f.get("group", ""),
                         "codec": f.get("codec") or "",
                         "audio": f.get("audio") or "",
                         "edition": f.get("edition") or "",
+                        "part": f.get("part") or "",
+                        # " - Part 2" or empty, so one template serves split
+                        # and single-file releases alike.
+                        "partN": f" - Part {f['part']}" if f.get("part") else "",
                         "id": show_data["id"],
                         # eff_source is F13-aware: after a tmdb→tvmaze
                         # fallback the id is TVmaze-internal and must NOT be
                         # emitted as a tmdbid. TVmaze ids are never imdb/tmdb.
                         "tmdbid": show_data["id"] if eff_source == "tmdb" else "",
-                        "imdbid": "",
+                        # Was hardcoded empty: TMDb keeps external ids off the
+                        # /tv record and nobody asked for them, so every
+                        # "[imdbid-…]" hint the README advertises collapsed to
+                        # nothing for TV while working for films.
+                        "imdbid": show_data.get("imdb_id") or "",
                     }
                     original = Path(f["path"])
                     new_path = build_new_path(original, template, bindings, out_base or original.parent.parent)
@@ -1382,14 +1975,20 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                         # Series twin of the movie flag above: set when the
                         # show was chosen by id (disambiguation dialog or
                         # Search metadata), not found by title search.
-                        "pinned": bool(req.selected_show_id),
+                        "pinned": bool(pick_show_id),
                         "metadata": {
                             "show": show_data.get("name"),
+                            "show_year": show_data.get("year"),
                             "season": best_ep["season"],
                             "episode": best_ep["episode"],
                             "title": best_ep.get("title"),
                             "overview": best_ep.get("overview") or "",
+                            "air_date": best_ep.get("air_date") or "",
                             "poster": show_data.get("poster"),
+                            # Same values the template bindings use — the .nfo
+                            # writer needs them and they were being dropped.
+                            "tmdbid": bindings["tmdbid"],
+                            "imdbid": bindings["imdbid"],
                             # Which provider actually supplied this show —
                             # differs from req.datasource after a fallback.
                             "datasource": show_data.get("fallback_source") or req.datasource,
@@ -1454,13 +2053,19 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
             # re-request with the chosen id: fetch that one record and let the
             # normal scoring/binding pipeline run over it, so {tmdbid}/
             # {imdbid}/{y}/score_detail all come out real.
-            exact_pick = bool(req.selected_movie_id and req.selected_movie_source)
+            pick_movie_id = req.selected_movie_id
+            pick_movie_source = req.selected_movie_source
+            if not pick_movie_id and alias and alias["media"] == "movie":
+                pick_movie_id = str(alias["id"])
+                pick_movie_source = alias["datasource"]
+
+            exact_pick = bool(pick_movie_id and pick_movie_source)
             if exact_pick:
                 try:
-                    if req.selected_movie_source == "tmdb":
+                    if pick_movie_source == "tmdb":
                         if not tmdb.enabled:
                             raise RuntimeError("TMDb key not configured")
-                        mid = int(req.selected_movie_id)
+                        mid = int(pick_movie_id)
                         details = await cached(
                             ("tmdb", "movie", mid),
                             lambda: with_retry(lambda: tmdb.get_movie_details(mid)))
@@ -1476,7 +2081,7 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                             "source": "tmdb",
                         }]
                     else:
-                        r = await omdb.get_by_imdb_id(req.selected_movie_id)
+                        r = await omdb.get_by_imdb_id(pick_movie_id)
                         movie_candidates = [] if r is None else [{
                             "title": r.title,
                             "original_title": r.title,
@@ -1488,8 +2093,19 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                         }]
                 except Exception as exc:
                     source_errors.setdefault(
-                        req.selected_movie_source, _sanitize_error(exc))
+                        pick_movie_source, _sanitize_error(exc))
                     movie_candidates = []
+
+                # Remember an explicit pick only — see the series branch.
+                if req.selected_movie_id and movie_candidates:
+                    save_alias(group_name, {
+                        "media": "movie",
+                        "datasource": pick_movie_source,
+                        "id": movie_candidates[0]["id"],
+                        "name": movie_candidates[0]["title"],
+                        "year": movie_candidates[0].get("year"),
+                    })
+                    _watch_state.clear()
 
             if not exact_pick and tmdb.enabled:
                 tmdb_results, errs = await _cascade_search(
@@ -1562,7 +2178,7 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                     if (len(same) >= 2
                             and len({c.get("year") for c in same}) >= 2
                             and name_similarity(group_name, same[0].get("title") or "")
-                                >= REVIEW_CONFIDENCE_THRESHOLD):
+                                >= _thresholds()[1]):
                         return {
                             "needs_selection": True,
                             "media": "movie",
@@ -1621,6 +2237,15 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                     best_movie = movie_candidates[0]
 
                 if best_movie:
+                    collection = ""
+                    tmdb_imdb_id = ""
+                    if (best_movie["source"] == "tmdb"
+                            and _template_needs_movie_details(template)):
+                        details = await _tmdb_movie_details(best_movie["id"])
+                        collection = ((details.get("belongs_to_collection") or {})
+                                      .get("name") or "")
+                        tmdb_imdb_id = details.get("imdb_id") or ""
+
                     # Per-metric breakdown for the chosen candidate (item 7).
                     score_detail = cascade_breakdown(
                         file_name=f["clean_name"],
@@ -1641,9 +2266,23 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                         "codec": f.get("codec") or "",
                         "audio": f.get("audio") or "",
                         "edition": f.get("edition") or "",
+                        "part": f.get("part") or "",
+                        # " - Part 2" or empty, so one template serves split
+                        # and single-file releases alike.
+                        "partN": f" - Part {f['part']}" if f.get("part") else "",
                         "id": best_movie["id"],
                         "tmdbid": best_movie["id"] if best_movie["source"] == "tmdb" else "",
-                        "imdbid": best_movie["id"] if best_movie["source"] == "omdb" else "",
+                        # An OMDb match IS an IMDb id; a TMDb match carries one
+                        # on its /movie record, which is fetched above only when
+                        # the template asked for it.
+                        "imdbid": (best_movie["id"] if best_movie["source"] == "omdb"
+                                   else tmdb_imdb_id),
+                        # TMDb's franchise name, verbatim — Plex's collection
+                        # agent matches on it. {collectionN} adds the trailing
+                        # slash so one template serves franchise and standalone
+                        # films alike (apply_template collapses the empty case).
+                        "collection": collection,
+                        "collectionN": f"{collection}/" if collection else "",
                     }
                     original = Path(f["path"])
                     new_path = build_new_path(original, template, bindings, out_base or original.parent)
@@ -1663,9 +2302,17 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                         "pinned": exact_pick,
                         "metadata": {
                             "title": best_movie["title"],
+                            "original_title": best_movie.get("original_title") or "",
+                            "collection": collection,
+                            # The series metadata has always carried this; the
+                            # movie one did not, so a film's history row could
+                            # not say which provider decided it.
+                            "datasource": best_movie["source"],
                             "year": best_movie.get("year"),
                             "overview": best_movie.get("overview") or "",
                             "poster": best_movie.get("poster"),
+                            "tmdbid": bindings["tmdbid"],
+                            "imdbid": bindings["imdbid"],
                         },
                     })
                 else:
@@ -1707,112 +2354,46 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                     "reason": "Could not detect series/movie from filename",
                 })
 
-    # ── Subtitle companion pairing ─────────────────────────────────────────
-    # Build a lookup from each matched video's original stem → its new_path stem.
-    # A subtitle companion is identified by sharing the same stem (ignoring any
-    # trailing language tag such as ".en" or ".forced.en").
-    video_stem_map: dict[str, dict] = {}
-    # Detection fallback for stem misses: subtitles downloaded from a
-    # different release never share the video's stem, but the scanner ran
-    # full detection on them too — pair on (normalized clean_name, season,
-    # episode). Values are LISTS so quality doubles claiming the same SxE
-    # can be detected and refused instead of guessed.
-    video_se_map: dict[tuple, list] = {}
-    vf_by_path = {f["path"]: f for f in video_files}
+    # A cancel leaves files with no result at all. They are reported as
+    # unmatched with a truthful reason rather than silently missing from a
+    # response the UI renders row-per-file.
+    if prog.get("cancel_requested"):
+        seen_paths = {r["original"] for r in results}
+        for f in req.files:
+            if f["path"] in seen_paths:
+                continue
+            results.append({
+                "original": f["path"], "filename": f["filename"],
+                "new_path": None, "new_name": None, "preview": None,
+                "score": 0, "matched": False, "metadata": None,
+                "reason": "Cancelled before matching",
+            })
+
+    # Round two produced ordinary results for files that happen to be
+    # subtitles: give them back their language tag (the template rendered a
+    # video name) and the flag the frontend gates on. Paired subtitles already
+    # carry both and are skipped by the is_subtitle check.
     for r in results:
-        if r.get("matched") and r.get("new_path"):
-            orig_stem = Path(r["original"]).stem.lower()
-            video_stem_map[orig_stem] = r
-            f = vf_by_path.get(r["original"])
-            # Music results also land here matched — their season is None,
-            # so the SxE index stays videos-only by construction.
-            if f and f.get("season") is not None and f.get("episode") is not None:
-                key = (normalize(f.get("clean_name") or ""), f["season"], f["episode"])
-                video_se_map.setdefault(key, []).append(r)
-
-    for sf in subtitle_files:
-        sub_path = Path(sf["path"])
-        sub_ext = sub_path.suffix.lower()
-        lang_tag = extract_subtitle_lang_tag(sub_path)
-        # The "clean" stem is the subtitle stem with the lang tag stripped
-        sub_stem_full = sub_path.stem  # e.g. "Show.S01E01.en"
-        if lang_tag:
-            # strip the lang tag suffix from the stem
-            clean_stem = sub_stem_full[: len(sub_stem_full) - len(lang_tag)]
-        else:
-            clean_stem = sub_stem_full
-
-        # Exact stem match first — it is certain. Detection fallback only
-        # fills stem MISSES, so pre-F27 pairings are byte-identical.
-        companion = video_stem_map.get(clean_stem.lower())
-        ambiguous_se = None
-        if companion is None and sf.get("season") is not None and sf.get("episode") is not None:
-            candidates = video_se_map.get(
-                (normalize(sf.get("clean_name") or ""), sf["season"], sf["episode"]), []
-            )
-            if len(candidates) == 1:
-                companion = candidates[0]
-            elif len(candidates) > 1:
-                ambiguous_se = (sf["season"], sf["episode"])
-
-        if companion:
-            # Derive new subtitle path from the companion video's new_path
-            companion_new = Path(companion["new_path"])
-            # The video's name is already truncated to the filesystem limit by
-            # build_new_path, but a subtitle appends MORE to that stem
-            # (".en" + ".srt"), which pushes it back over. This name is built
-            # by concatenation and never passes through build_new_path, so it
-            # needs the same byte budget applied explicitly — otherwise the
-            # over-long path makes Path.exists() raise ENAMETOOLONG in the
-            # conflict scan below and 500s the WHOLE match, not just this file.
-            new_sub_name = truncate_component(
-                companion_new.stem,
-                reserve=len((lang_tag + sub_ext).encode("utf-8")),
-            ) + lang_tag + sub_ext
-            new_sub_path = companion_new.parent / new_sub_name
-            results.append({
-                "original": sf["path"],
-                "filename": sf["filename"],
-                "new_path": str(new_sub_path),
-                "new_name": new_sub_name,
-                "preview": new_sub_name,
-                "score": companion["score"],
-                "matched": True,
-                # Inherit the companion's pinned flag along with its score.
-                # A subtitle carries no evidence of its own — it is renamed
-                # BECAUSE its video was. Without this the frontend's
-                # confidence gate keeps a pinned low-score video selected but
-                # drops its subtitle, renaming the video and orphaning the
-                # .srt beside it under the old name.
-                "pinned": companion.get("pinned", False),
-                "metadata": companion.get("metadata"),
-                "is_subtitle": True,
-            })
-        else:
-            # No companion video matched — skip (do not rename). Ambiguity
-            # gets its own truthful reason: renaming against the wrong
-            # quality double would be a guess.
-            if ambiguous_se:
-                s, e = ambiguous_se
-                reason = (
-                    f"Subtitle skipped — multiple videos match "
-                    f"S{s:02d}E{e:02d}; rename manually"
-                )
-            else:
-                reason = "Subtitle skipped — companion video not in this batch"
-            results.append({
-                "original": sf["path"],
-                "filename": sf["filename"],
-                "new_path": None,
-                "new_name": None,
-                "preview": None,
-                "score": 0,
-                "matched": False,
-                "is_subtitle": True,
-                "reason": reason,
-            })
+        if r.get("is_subtitle") or not r.get("matched") or not r.get("new_path"):
+            continue
+        original = Path(r["original"])
+        if not is_subtitle_file(original):
+            continue
+        new_path = Path(r["new_path"])
+        tag = normalize_subtitle_tag(extract_subtitle_lang_tag(original))
+        if tag:
+            # Same byte budget build_new_path applies — the tag is appended
+            # after truncation, so it has to be reserved for explicitly.
+            stem = truncate_component(
+                new_path.stem, reserve=len((tag + new_path.suffix).encode("utf-8")))
+            new_path = new_path.with_name(stem + tag + new_path.suffix)
+        r["new_path"] = str(new_path)
+        r["new_name"] = new_path.name
+        r["preview"] = new_path.name
+        r["is_subtitle"] = True
 
     # Detect conflicts
+    files_by_path = {f["path"]: f for f in req.files}
     conflicts = []
     dest_paths = {}
     
@@ -1840,12 +2421,126 @@ async def _match_files_impl(req: MatchRequest, progress: dict = None):
                 "file": r["original"],
                 "destination": r["new_path"],
                 "message": f"Destination already exists: {new_path.name}",
+                # The common case here is a quality upgrade, and the app knew
+                # both sides all along: the scanner had the incoming file's
+                # size and tags, and the existing one is a stat() away. Without
+                # them the only honest choices were "(2)" or give up.
+                "incoming": _quality_of_result(r, files_by_path.get(r["original"])),
+                "existing": _quality_on_disk(new_path),
             })
 
     return {"results": results, "conflicts": conflicts, "source_errors": source_errors}
 
 
 # ─── Rename Endpoint ───────────────────────────────────────────────────
+
+# Album art a ripper leaves beside the tracks. Not media, so the scanner never
+# lists it — and when the tracks move to {artist}/{album}/ it is left behind in
+# a folder that is then pruned away.
+ART_FILENAMES = ("cover.jpg", "cover.png", "folder.jpg", "folder.png",
+                 "front.jpg", "front.png", "albumart.jpg")
+
+
+def _move_album_art(operations: list, results: list, action: RenameAction,
+                    batch_id: str) -> list:
+    """Move album art after the last track leaves its folder. Returns history
+    entries for whatever moved, so undo puts it back.
+
+    Deliberately narrow. The user selected tracks, not this file, so it travels
+    only when:
+      * the action is MOVE (a copy or a link leaves the source album intact),
+      * this batch emptied the folder of audio — art beside tracks that stayed
+        put belongs to those tracks,
+      * the destination has no art of its own — never overwrite.
+    A failure here is logged into the entry and never touches a track's result:
+    the music is already where the user asked for it.
+    """
+    if action != RenameAction.MOVE:
+        return []
+
+    moved_from: dict[Path, Path] = {}
+    for op, result in zip(operations, results):
+        if not result.get("success"):
+            continue
+        source = Path(op["original"])
+        if source.suffix.lower() in AUDIO_EXTENSIONS:
+            moved_from.setdefault(source.parent, Path(result["destination"]).parent)
+
+    entries = []
+    for source_dir, dest_dir in moved_from.items():
+        if source_dir == dest_dir:
+            continue
+        try:
+            if any(child.is_file() and child.suffix.lower() in AUDIO_EXTENSIONS
+                   for child in source_dir.iterdir()):
+                continue    # tracks stayed behind; the art belongs to them
+        except OSError:
+            continue
+
+        for name in ART_FILENAMES:
+            art = source_dir / name
+            destination = dest_dir / name
+            if not art.is_file() or destination.exists():
+                continue
+            error = None
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(art), str(destination))
+            except OSError as exc:
+                error = str(exc)
+            entries.append(HistoryEntry(
+                id=str(uuid.uuid4()),
+                timestamp=datetime.now().isoformat(),
+                action=RenameAction.MOVE.value,
+                original=str(art),
+                destination=str(destination),
+                success=error is None,
+                error=error,
+                batch_id=batch_id,
+            ))
+    return entries
+
+
+# What a history entry may keep from a match result. Bounded on purpose: the
+# metadata dict comes back from the browser, and the log holds 1000 of them.
+HISTORY_METADATA_KEYS = (
+    "show", "title", "original_title", "year", "show_year", "season", "episode",
+    "air_date", "overview", "tmdbid", "imdbid", "collection", "datasource",
+    "artist", "album", "track",
+)
+MAX_HISTORY_TEXT = 500
+MAX_HISTORY_OVERVIEW = 300
+
+
+def _bounded_text(value, limit: int = MAX_HISTORY_TEXT) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    return value[:limit]
+
+
+def _bounded_confidence(value) -> Optional[float]:
+    try:
+        return round(min(1.0, max(0.0, float(value))), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def _history_metadata(meta) -> Optional[dict]:
+    """The known keys of a match's metadata, truncated. Unknown keys are
+    dropped rather than stored: this is an audit record, not a scratchpad."""
+    if not isinstance(meta, dict):
+        return None
+    kept: dict = {}
+    for key in HISTORY_METADATA_KEYS:
+        value = meta.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, str):
+            kept[key] = value[:MAX_HISTORY_OVERVIEW if key == "overview" else MAX_HISTORY_TEXT]
+        elif isinstance(value, (int, float, bool)):
+            kept[key] = value
+    return kept or None
+
 
 def _rename_sync(operations: list, action: RenameAction, batch_id: str,
                  progress: dict = None, protect_dir: Optional[Path] = None) -> tuple:
@@ -1886,13 +2581,15 @@ def _rename_sync(operations: list, action: RenameAction, batch_id: str,
                 error="Source file not found",
             )
         else:
-            result = execute_rename(source, dest, action)
+            result = execute_rename(source, dest, action,
+                                    replace_existing=bool(op.get("replace_existing")))
 
         results.append({
             "original": str(result.original),
             "destination": str(result.destination),
             "success": result.success,
             "error": result.error,
+            "parked": str(result.parked) if result.parked else None,
         })
 
         if (action == RenameAction.MOVE and result.success
@@ -1900,6 +2597,20 @@ def _rename_sync(operations: list, action: RenameAction, batch_id: str,
             prune_candidates.setdefault(str(source.parent), dest)
 
         # Record in history
+        # The displaced file gets its own entry, appended FIRST: undo_batch
+        # replays in reverse, so the incoming file moves back out of the way
+        # before the parked original is restored on top of it.
+        if result.parked is not None:
+            history_entries.append(HistoryEntry(
+                id=str(uuid.uuid4()),
+                timestamp=datetime.now().isoformat(),
+                action=RenameAction.MOVE.value,
+                original=str(result.destination),
+                destination=str(result.parked),
+                success=True,
+                batch_id=batch_id,
+            ))
+
         history_entries.append(HistoryEntry(
             id=str(uuid.uuid4()),
             timestamp=datetime.now().isoformat(),
@@ -1909,7 +2620,18 @@ def _rename_sync(operations: list, action: RenameAction, batch_id: str,
             success=result.success,
             error=result.error,
             batch_id=batch_id,
+            # The match's own reasoning, bounded before it is persisted: the
+            # dict round-trips through the browser, and 1000 unbounded ones is
+            # a disk-filler on a NAS.
+            metadata=_history_metadata(op.get("metadata")),
+            template=_bounded_text(op.get("template")),
+            confidence=_bounded_confidence(op.get("confidence")),
+            datasource=_bounded_text(op.get("datasource"), limit=32),
         ))
+
+    # Before the prune: art still sitting in the source folder would keep it
+    # non-empty, so the walk below would leave an orphaned directory behind.
+    history_entries.extend(_move_album_art(operations, results, action, batch_id))
 
     # Same safety envelope as the undo-side pruning (F10): rmdir()-only walk
     # (can never delete data), at most 3 levels upward, never at/above the
@@ -1933,6 +2655,42 @@ def _rename_sync(operations: list, action: RenameAction, batch_id: str,
         _prune_empty_dirs(parent, stop)
 
     return results, history_entries
+
+
+POSTER_CLIENT_TIMEOUT = 20.0   # whole-request budget for one poster fetch
+
+
+async def _write_batch_sidecars(operations: list, results: list) -> list[str]:
+    """Kodi/Jellyfin .nfo + poster for every operation that actually landed.
+
+    Runs AFTER the rename batch and outside it on purpose: the user's files
+    have already moved, so a metadata write or a poster fetch must never be
+    able to turn a successful rename into a failed one. Failures are collected
+    and reported separately.
+
+    Sequential by design — episodes of one show share a single poster target,
+    so the first download populates it and the rest short-circuit on "already
+    exists". Concurrency would race that.
+    """
+    todo = [
+        (Path(r["destination"]), op.get("metadata") or {})
+        for op, r in zip(operations, results)
+        if r.get("success") and op.get("metadata") and not op.get("is_subtitle")
+    ]
+    if not todo:
+        return []
+
+    errors: list[str] = []
+    # follow_redirects stays OFF (httpx default): a 30x from an allow-listed
+    # poster host is the one way sidecar._check_poster_url could be walked past.
+    async with httpx.AsyncClient(
+        timeout=POSTER_CLIENT_TIMEOUT,
+        headers={"User-Agent": f"CineSort/{__version__}"},
+    ) as client:
+        for destination, metadata in todo:
+            _, errs = await write_sidecars_for(destination, metadata, client)
+            errors.extend(errs)
+    return errors
 
 
 @app.post("/api/rename")
@@ -1973,9 +2731,15 @@ async def rename_files(req: RenameRequest):
     if history_entries:
         history.add_batch(history_entries)
 
+    # Dry runs must leave the library byte-identical — no .nfo, no poster.
+    sidecar_errors: list[str] = []
+    if req.write_sidecars and action != RenameAction.TEST:
+        sidecar_errors = await _write_batch_sidecars(req.operations, results)
+
     return {
         "action": action.value,
         "batch_id": batch_id,
+        "sidecar_errors": sidecar_errors,
         "total": len(results),
         "success": sum(1 for r in results if r["success"]),
         "failed": sum(1 for r in results if not r["success"]),
@@ -1987,7 +2751,7 @@ async def rename_files(req: RenameRequest):
 # A background loop polls each enabled watch rule and runs the SAME
 # scan → match → rename internals the interactive flow uses — with private
 # progress dicts so the interactive snapshots/tickers are never perturbed.
-# Only matches at/above REVIEW_CONFIDENCE_THRESHOLD act; ambiguous groups
+# Only matches at/above the review threshold act; ambiguous groups
 # (needs_selection) and everything below the gate are left in place. Every
 # run is a normal history batch — undoable from the History modal.
 
@@ -2047,10 +2811,17 @@ async def _watch_one(w: dict) -> None:
     st = _watch_state.setdefault(folder, {"sizes": {}, "done": set()})
 
     scan = await asyncio.to_thread(
-        _scan_dir_sync, folder, True, {"seen": 0, "media": 0})
+        _scan_dir_sync, folder, w["recursive"], {"seen": 0, "media": 0},
+        w["include_extras"])
+    files = scan["files"]
+    if w["media_types"]:
+        # Filtered before the settle bookkeeping, so a type this rule ignores
+        # never enters its state at all.
+        files = [f for f in files if f.get("media_type") in w["media_types"]]
+
     prev, cur = st["sizes"], {}
     ready = []
-    for f in scan["files"]:
+    for f in files:
         rp = str(Path(f["path"]).resolve())
         cur[rp] = f["size"]
         if rp in st["done"]:
@@ -2086,21 +2857,40 @@ async def _watch_one(w: dict) -> None:
                 n += 1
         _watch_log_add(folder, (
             f"skipped '{gname}' ({n} file(s)) — ambiguous "
-            f"({len(data.get('candidates') or [])} candidates); match it once "
-            f"manually, then rename stays automatic"))
+            f"({len(data.get('candidates') or [])} candidates); pick it once in "
+            f"the app and it will be remembered"))
         return
 
+    # A rule may demand more confidence than the deployment's default, never
+    # less silently: None means "follow the global gate".
+    threshold = (w["min_confidence"] if w["min_confidence"] is not None
+                 else _thresholds()[1])
+
     ops, held = [], 0
+    best_held = 0.0
     for r in data.get("results", []):
         rp = str(Path(r["original"]).resolve())
         if (r.get("matched") and r.get("new_path")
-                and r.get("score", 0) >= REVIEW_CONFIDENCE_THRESHOLD):
-            ops.append({"original": r["original"], "new_path": r["new_path"]})
+                and r.get("score", 0) >= threshold):
+            ops.append({"original": r["original"], "new_path": r["new_path"],
+                        "metadata": r.get("metadata"),
+                        "is_subtitle": bool(r.get("is_subtitle")),
+                        # Same audit trail an interactive rename writes — a
+                        # watch-folder run is exactly where "why did this move?"
+                        # gets asked, because nobody was watching.
+                        "confidence": r.get("score"),
+                        "datasource": (r.get("metadata") or {}).get("datasource"),
+                        "template": w["template"]})
         else:
             st["done"].add(rp)   # don't re-spam providers for it every cycle
             held += 1
+            best_held = max(best_held, r.get("score", 0) or 0)
     if not ops:
-        _watch_log_add(folder, f"nothing safe to organize ({held} file(s) left in place)")
+        # Say WHICH gate held them: "nothing safe" reads as a bug when the
+        # answer is a threshold the user themselves set two clicks away.
+        _watch_log_add(folder, (
+            f"nothing safe to organize ({held} file(s) left in place; "
+            f"best confidence {best_held:.2f} < minimum {threshold:.2f})"))
         return
 
     batch_id = str(uuid.uuid4())
@@ -2110,22 +2900,34 @@ async def _watch_one(w: dict) -> None:
         Path(folder))   # protect the watched root from the empty-dir prune
     if history_entries:
         history.add_batch(history_entries)
+    if w.get("write_sidecars"):
+        for err in await _write_batch_sidecars(ops, results):
+            _watch_log_add(folder, f"sidecar: {err}")
     for r in results:
         st["done"].add(str(Path(r["original"]).resolve()))
     succ = sum(1 for r in results if r["success"])
     msg = f"organized {succ} of {len(ops)} file(s) ({w['action']})"
     if held:
-        msg += f", {held} left in place"
+        msg += f", {held} left in place (below {threshold:.2f})"
     if succ < len(ops):
         first_err = next((r["error"] for r in results if not r["success"]), "")
         msg += f" — first failure: {first_err}"
     _watch_log_add(folder, msg)
 
 
+# Runtime pause, deliberately NOT persisted: the tray's "Pause watching" is a
+# temporary "not right now", and flipping every saved rule's `enabled` would
+# rewrite the user's configuration to express it — a state they would find
+# still applied after a restart, with no memory of having chosen it.
+_watch_paused = False
+
+
 async def _watch_loop() -> None:
     while True:
         try:
             await asyncio.sleep(_watch_interval())
+            if _watch_paused:
+                continue
             # Never contend with an interactive run for providers/filesystem.
             if (match_progress["active"] or rename_progress["active"]
                     or scan_progress["active"]):
@@ -2158,6 +2960,7 @@ async def get_watches():
         "watches": load_watches(),
         "status": _watch_status,
         "interval": _watch_interval(),
+        "paused": _watch_paused,
     }
 
 
@@ -2193,6 +2996,85 @@ async def post_watches(req: WatchListRequest):
     return {"watches": saved}
 
 
+class PrefsRequest(BaseModel):
+    """UI preferences shared by every browser pointed at this instance.
+
+    Every field optional and merged server-side: a client that only knows some
+    of them must not wipe the rest, and a save from one browser must not drop
+    the presets another just added.
+    """
+    datasource: Optional[str] = None
+    action: Optional[str] = None
+    template: Optional[str] = None
+    destination: Optional[str] = None
+    subfolders: Optional[bool] = None
+    include_extras: Optional[bool] = None
+    write_sidecars: Optional[bool] = None
+    custom_presets: Optional[list] = None
+
+    @field_validator("custom_presets")
+    @classmethod
+    def validate_presets(cls, v):
+        if v is not None and len(v) > MAX_CUSTOM_PRESETS:
+            raise ValueError(
+                f"At most {MAX_CUSTOM_PRESETS} custom presets are supported")
+        return v
+
+
+@app.get("/api/prefs")
+async def get_prefs():
+    """Shared UI preferences. Holds no secrets; the destination is a path the
+    same class as the ones /api/watches and /api/history already return."""
+    return load_prefs()
+
+
+@app.put("/api/prefs")
+async def put_prefs(req: PrefsRequest):
+    try:
+        return save_prefs(req.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/aliases")
+async def get_aliases():
+    """Remembered picks, newest last (insertion order is the save order).
+
+    Holds no filesystem paths and grants no capability — an alias only
+    pre-answers the disambiguation question the user was going to be asked.
+    """
+    return {"aliases": [{"key": k, **v} for k, v in load_aliases().items()]}
+
+
+@app.delete("/api/aliases/{key:path}")
+async def delete_alias(key: str):
+    """Forget one remembered pick. `key` is a normalized title, never a path —
+    it is only ever used as a dict key, so it cannot address the filesystem."""
+    removed = forget_alias(alias_key(key))
+    # A watch rule may have held this title's files as "ambiguous"; let the
+    # next cycle re-evaluate them under the new (absent) answer.
+    if removed:
+        _watch_state.clear()
+    return {"removed": removed}
+
+
+class WatchPauseRequest(BaseModel):
+    paused: bool
+
+
+@app.post("/api/watch-pause")
+async def set_watch_pause(req: WatchPauseRequest):
+    """Suspend or resume the watch loop for this session.
+
+    Runtime only: the saved rules are untouched, so a restart resumes. The
+    desktop tray uses this so "pause" cannot silently become "I disabled all
+    your rules".
+    """
+    global _watch_paused
+    _watch_paused = req.paused
+    return {"paused": _watch_paused}
+
+
 @app.get("/api/watch-log")
 async def get_watch_log():
     """Last 50 auto-organize outcomes (in-memory ring, newest last)."""
@@ -2204,6 +3086,14 @@ async def get_watch_log():
 @app.get("/api/templates")
 async def get_templates():
     return TEMPLATES
+
+
+@app.get("/api/tokens")
+async def get_tokens():
+    """Every template token, from the one table apply_template validates
+    against — so the palette can never list a token the formatter does not
+    know, or miss one it does."""
+    return TOKENS
 
 
 class PreviewRequest(BaseModel):
@@ -2254,6 +3144,12 @@ async def preview_template(req: PreviewRequest):
         # formatter's cleanup collapses the surrounding "[]" — a placeholder
         # would make every preview claim an Extended cut.
         "edition": s.get("edition") or "",
+        "part": s.get("part") or "",
+        "partN": f" - Part {s['part']}" if s.get("part") else "",
+        # Collections exist only after a TMDb match; a preview sample never has
+        # one, so both render empty and the folder level simply does not appear.
+        "collection": "",
+        "collectionN": "",
         "id": pick("id", 0),
         # Ids exist only after matching (scan samples never carry them) —
         # empty here, so "[imdbid-{imdbid}]" previews collapse cleanly.
@@ -2270,7 +3166,9 @@ async def preview_template(req: PreviewRequest):
         preview = apply_template(req.template, bindings)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid template: {exc}")
-    return {"preview": preview}
+    # A typo renders as literal text ("{episode}" stays in the name), which
+    # reads as a formatter bug rather than a typo. Name them instead.
+    return {"preview": preview, "unknown": unknown_tokens(req.template)}
 
 
 # Display label for each rename action, served via /api/actions so the UI
@@ -2284,6 +3182,7 @@ ACTION_LABELS = {
     RenameAction.MOVE:     "Move",
     RenameAction.KEEPLINK: "Move + Keep Link",
     RenameAction.COPY:     "Copy",
+    RenameAction.REFLINK:  "Reflink copy (btrfs/XFS/ZFS — instant, no extra space)",
     RenameAction.HARDLINK: "Hard Link",
     RenameAction.SYMLINK:  "Symlink",
 }
@@ -2403,6 +3302,149 @@ async def get_version(force: bool = Query(False)):
 
 # ─── History Endpoints ─────────────────────────────────────────────────
 
+CSV_COLUMNS = ("id", "timestamp", "action", "original", "destination", "success",
+               "error", "batch_id", "template", "datasource", "confidence",
+               "title", "year", "season", "episode", "tmdbid", "imdbid")
+
+# Spreadsheets execute a cell that starts with one of these. A media file can
+# legitimately be named "=Movie.2010.mkv", and a title comes from a provider —
+# neither is trusted input, and "open the export in Excel" is the whole point of
+# the feature. Prefixing with an apostrophe is the standard neutralization.
+_CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value) -> str:
+    """One cell, safe to open in a spreadsheet (CWE-1236)."""
+    if value is None:
+        return ""
+    text = str(value)
+    if text.startswith(_CSV_FORMULA_LEAD):
+        return "'" + text
+    return text
+
+
+def _history_rows(entries: list):
+    """CSV rows, flattening the metadata dict into its own columns."""
+    yield CSV_COLUMNS
+    for entry in entries:
+        meta = entry.metadata or {}
+        row = {
+            "id": entry.id, "timestamp": entry.timestamp, "action": entry.action,
+            "original": entry.original, "destination": entry.destination,
+            "success": entry.success, "error": entry.error, "batch_id": entry.batch_id,
+            "template": entry.template, "datasource": entry.datasource or meta.get("datasource"),
+            "confidence": entry.confidence,
+            "title": meta.get("show") or meta.get("title"),
+            "year": meta.get("show_year") or meta.get("year"),
+            "season": meta.get("season"), "episode": meta.get("episode"),
+            "tmdbid": meta.get("tmdbid"), "imdbid": meta.get("imdbid"),
+        }
+        yield [_csv_safe(row[column]) for column in CSV_COLUMNS]
+
+
+class ReapplyRequest(BaseModel):
+    """Re-render one past match under a different template.
+
+    Addressed by entry ID, not by position: get_recent() is newest-first, so an
+    index shifts the moment anything else is renamed — and acting on the wrong
+    entry here means renaming the wrong file.
+    """
+    id: str
+    template: str
+    output_dir: Optional[str] = None
+
+    @field_validator("template")
+    @classmethod
+    def validate_template(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Template must not be empty.")
+        return v
+
+
+def bindings_from_metadata(meta: dict) -> dict:
+    """Template bindings rebuilt from a stored match — the same keys the live
+    match path binds, so a re-apply and a fresh match render identically."""
+    meta = meta or {}
+    is_music = bool(meta.get("artist") or meta.get("album"))
+    part = meta.get("part")
+    return {
+        "n": meta.get("show") or meta.get("title") or "",
+        "y": meta.get("show_year") or meta.get("year") or "",
+        "s": meta.get("season"),
+        "e": meta.get("episode"),
+        "e_end": meta.get("episode_end"),
+        "t": meta.get("title") or "",
+        "absolute": meta.get("absolute"),
+        "d": meta.get("air_date") or "",
+        "source": meta.get("source") or "",
+        "vf": meta.get("video_format") or "",
+        "group": meta.get("group") or "",
+        "codec": meta.get("codec") or "",
+        "audio": meta.get("audio") or "",
+        "edition": meta.get("edition") or "",
+        "part": part or "",
+        "partN": f" - Part {part}" if part else "",
+        "collection": meta.get("collection") or "",
+        "collectionN": (f"{meta['collection']}/" if meta.get("collection") else ""),
+        "id": meta.get("tmdbid") or meta.get("imdbid") or "",
+        "tmdbid": meta.get("tmdbid") or "",
+        "imdbid": meta.get("imdbid") or "",
+        "artist": meta.get("artist") or "",
+        "album": meta.get("album") or "",
+        "track": str(meta.get("track") or "").zfill(2) if is_music else "",
+    }
+
+
+@app.post("/api/history/reapply")
+async def reapply_template(req: ReapplyRequest):
+    """The path this entry WOULD have got under `template`, computed entirely
+    from what was stored — no provider is contacted, so this works offline and
+    costs nothing. The caller then feeds it to /api/rename, so history and undo
+    stay the single path that touches files."""
+    entry = next((e for e in history.get_recent(1000) if e.id == req.id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="No such history entry.")
+    if not entry.metadata:
+        raise HTTPException(
+            status_code=409,
+            detail="No stored metadata for this entry — it predates rich history.")
+
+    current = Path(entry.destination)
+    out_base = None
+    if req.output_dir:
+        out_base = Path(req.output_dir).expanduser().resolve()
+        try:
+            _require_within_roots(out_base, "The destination folder")
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+
+    new_path = build_new_path(current, req.template,
+                              bindings_from_metadata(entry.metadata),
+                              out_base or current.parent)
+    return {"original": entry.destination, "new_path": str(new_path),
+            "new_name": new_path.name, "unchanged": str(new_path) == entry.destination}
+
+
+@app.get("/api/history/export.csv")
+async def export_history_csv(limit: int = 1000):
+    """The whole log as CSV — the answer to the 1000-entry cap.
+
+    Streamed so a full log never materializes as one string in memory.
+    """
+    def generate():
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        for row in _history_rows(history.get_recent(limit)):
+            writer.writerow(row)
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+
+    return StreamingResponse(
+        generate(), media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="cinesort-history.csv"'})
+
+
 @app.get("/api/history")
 async def get_history(limit: int = 50):
     """Get recent rename operations."""
@@ -2417,6 +3459,10 @@ async def get_history(limit: int = 50):
             "success": e.success,
             "error": e.error,
             "batch_id": e.batch_id,
+            "metadata": e.metadata,
+            "template": e.template,
+            "confidence": e.confidence,
+            "datasource": e.datasource,
         }
         for e in entries
     ]}
@@ -2462,6 +3508,7 @@ async def get_settings():
     """
     status = read_config_status()
     in_file = read_file_keys()
+    low, review = _thresholds()
     return {
         "tmdb_key_set": status.get("TMDB_API_KEY", False),
         "omdb_key_set": status.get("OMDB_API_KEY", False),
@@ -2479,9 +3526,21 @@ async def get_settings():
         # Metadata language (not a secret — safe to echo back for the UI field)
         "tmdb_language": os.environ.get("TMDB_LANGUAGE", ""),
         # Confidence thresholds — the frontend adopts these at startup so all
-        # build targets share one gate (see LOW_CONFIDENCE_THRESHOLD above).
-        "low_confidence": LOW_CONFIDENCE_THRESHOLD,
-        "review_confidence": REVIEW_CONFIDENCE_THRESHOLD,
+        # build targets share one gate (see _thresholds() above).
+        "low_confidence": low,
+        "review_confidence": review,
+        "watch_interval": _watch_interval(),
+        "cache_ttl": provider_cache.ttl,
+        # Desktop only; the page hides the control when not in Electron.
+        "keep_in_tray": os.environ.get("CINESORT_TRAY", "0") == "1",
+        # Which of these come from the ENVIRONMENT rather than keys.env. An
+        # env var wins on every restart (config.load_config never overwrites
+        # one), so a Settings edit to such a knob would not survive — the UI
+        # says so instead of silently losing the change.
+        "tuning_managed_in_env": {
+            name.lower().replace("cinesort_", ""): name in _ENV_SUPPLIED_TUNING
+            for name in TUNING_KEYS
+        },
     }
 
 
@@ -2519,8 +3578,27 @@ async def post_settings(req: SettingsRequest):
     elif "tmdb_language" in (req.model_fields_set or set()):
         updates["TMDB_LANGUAGE"] = ""
 
+    # Runtime tuning. None = untouched, so saving an API key cannot rewrite a
+    # threshold the user never opened.
+    for field, key in (("low_confidence", "CINESORT_LOW_CONFIDENCE"),
+                       ("review_confidence", "CINESORT_REVIEW_CONFIDENCE"),
+                       ("watch_interval", "CINESORT_WATCH_INTERVAL"),
+                       ("cache_ttl", "CINESORT_CACHE_TTL")):
+        value = getattr(req, field)
+        if value is not None:
+            updates[key] = str(value)
+    if req.keep_in_tray is not None:
+        updates["CINESORT_TRAY"] = "1" if req.keep_in_tray else "0"
+
     if updates:
         save_config(updates)   # writes file + updates os.environ in-place
+
+    # TTLCache reads self.ttl on every set(), so the new value applies to the
+    # next cached response. Entries already stored keep their OLD expiry, which
+    # would make a shortened TTL a lie — clear them.
+    if req.cache_ttl is not None and req.cache_ttl != provider_cache.ttl:
+        provider_cache.ttl = float(req.cache_ttl)
+        provider_cache.clear()
 
     # Re-instantiate API clients so the new keys take effect immediately
     # without needing an app restart.

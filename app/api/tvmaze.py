@@ -3,12 +3,19 @@ TVmaze API client — completely free, no API key required.
 https://www.tvmaze.com/api
 """
 
+import re
+
 import httpx
 from dataclasses import dataclass
 from typing import Optional
 
 
 API_BASE = "https://api.tvmaze.com"
+
+# Same shape TMDb validates against (tmdb.py). The id reaches us from the user
+# and goes into a query parameter, so it is checked before the request is made
+# rather than trusted to be well-formed.
+_IMDB_ID_RE = re.compile(r"tt\d{7,8}")
 
 
 @dataclass
@@ -20,6 +27,8 @@ class TVMazeShow:
     image_url: Optional[str] = None
     status: str = ""
     genres: list[str] = None
+    # TVmaze returns externals.imdb on every show; it was parsed away.
+    imdb_id: Optional[str] = None
 
     def __post_init__(self):
         if self.genres is None:
@@ -60,6 +69,7 @@ class TVMazeClient:
                 image_url=image.get("medium"),
                 status=show.get("status", ""),
                 genres=show.get("genres", []),
+                imdb_id=(show.get("externals") or {}).get("imdb"),
             ))
         return results
 
@@ -99,10 +109,7 @@ class TVMazeClient:
             ))
         return episodes
 
-    async def get_show(self, show_id: int) -> TVMazeShow:
-        resp = await self._client.get(f"/shows/{show_id}")
-        resp.raise_for_status()
-        show = resp.json()
+    def _to_show(self, show: dict) -> TVMazeShow:
         premiered = show.get("premiered", "") or ""
         image = show.get("image") or {}
         return TVMazeShow(
@@ -113,7 +120,39 @@ class TVMazeClient:
             image_url=image.get("medium"),
             status=show.get("status", ""),
             genres=show.get("genres", []),
+            imdb_id=(show.get("externals") or {}).get("imdb"),
         )
+
+    async def get_show(self, show_id: int) -> TVMazeShow:
+        resp = await self._client.get(f"/shows/{show_id}")
+        resp.raise_for_status()
+        return self._to_show(resp.json())
+
+    async def lookup_by_imdb(self, imdb_id: str) -> Optional[TVMazeShow]:
+        """The show carrying this IMDb id, or None when TVmaze does not know it.
+
+        Keyless, so this is the one IMDb→show bridge available to a deployment
+        with no API keys at all. A 404 is the documented "unknown id" answer,
+        not an error worth surfacing.
+        """
+        if not _IMDB_ID_RE.fullmatch(imdb_id or ""):
+            raise ValueError(f"Invalid IMDb ID format: {imdb_id!r}")
+        try:
+            # This endpoint answers 301 → /shows/{id}; httpx does not follow
+            # redirects by default. Following is enabled for THIS request only,
+            # and the host of wherever it landed is checked afterwards — a
+            # redirect is the one way a response could steer a request off the
+            # API we meant to call.
+            resp = await self._client.get(
+                "/lookup/shows", params={"imdb": imdb_id}, follow_redirects=True)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if resp.url.host != httpx.URL(API_BASE).host:
+            raise RuntimeError(f"TVmaze lookup redirected off-site: {resp.url.host}")
+        return self._to_show(resp.json())
 
     async def close(self):
         await self._client.aclose()

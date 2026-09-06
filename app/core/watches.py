@@ -26,8 +26,23 @@ from app.core.config import config_file
 ALLOWED_SOURCES = {"tmdb", "tvmaze", "omdb", "musicbrainz"}
 # Never "rename" (in-place renaming a download folder is pointless headless)
 # and never "test" (a dry run nobody sees).
-ALLOWED_ACTIONS = {"move", "copy", "hardlink", "symlink", "keeplink"}
+ALLOWED_ACTIONS = {"move", "copy", "reflink", "hardlink", "symlink", "keeplink"}
+ALLOWED_MEDIA_TYPES = ("series", "movie", "music")
 MAX_WATCHES = 10
+
+
+def _clamped_confidence(value) -> Optional[float]:
+    """A per-rule score floor in [0, 1], or None to follow the global one.
+
+    Anything unparseable is None rather than 0: a typo in the config must not
+    silently turn a rule into "rename whatever you matched, at any confidence".
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return min(1.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def watches_file() -> Path:
@@ -61,6 +76,20 @@ def _clean(entry, check_fs: bool) -> Optional[dict]:
         "action": action,
         "output_dir": (str(Path(out).expanduser().resolve()) if (out and check_fs) else out),
         "enabled": bool(entry.get("enabled", True)),
+        # Kodi/Jellyfin .nfo + poster for files this rule organizes.
+        "write_sidecars": bool(entry.get("write_sidecars", False)),
+        # ── Per-rule intent. Every one of these already exists as a choice in
+        # the interactive path; a rule could not express any of them, so one
+        # rule for ~/Downloads had to mean "everything, everywhere, at the
+        # global threshold". Defaults reproduce exactly the old behaviour.
+        "recursive": bool(entry.get("recursive", True)),
+        "include_extras": bool(entry.get("include_extras", False)),
+        # None = follow the global review threshold.
+        "min_confidence": _clamped_confidence(entry.get("min_confidence")),
+        # None = every type. An empty list means the same thing: a rule that
+        # matches nothing is a broken rule, not an intent.
+        "media_types": [t for t in (entry.get("media_types") or [])
+                        if t in ALLOWED_MEDIA_TYPES] or None,
     }
 
 

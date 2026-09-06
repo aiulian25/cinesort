@@ -44,7 +44,28 @@ def config_file() -> Path:
 
 
 # ── Keys we manage ─────────────────────────────────────────────────────────────
-MANAGED_KEYS = ("TMDB_API_KEY", "OMDB_API_KEY", "TMDB_LANGUAGE")
+MANAGED_KEYS = (
+    "TMDB_API_KEY", "OMDB_API_KEY", "TMDB_LANGUAGE",
+    # Runtime tuning. Not secrets, but they live here for the same reason the
+    # language does: one persisted place the UI owns, on every build target.
+    # Desktop packages have no practical way to set an env var at all — a
+    # .desktop launcher passes none — so without this these knobs were
+    # Docker-only.
+    "CINESORT_LOW_CONFIDENCE", "CINESORT_REVIEW_CONFIDENCE",
+    "CINESORT_WATCH_INTERVAL", "CINESORT_CACHE_TTL",
+    # Desktop tray mode (see electron/main.js). "1" or "0".
+    "CINESORT_TRAY",
+)
+
+# Bounds enforced at the CONFIG layer as well as the API layer: keys.env is
+# hand-editable, and a value read back from it must not be able to widen a
+# gate (a 0 review threshold would auto-rename anything a watch rule matched).
+_NUMERIC_KEYS = {
+    "CINESORT_LOW_CONFIDENCE": (0.0, 1.0),
+    "CINESORT_REVIEW_CONFIDENCE": (0.0, 1.0),
+    "CINESORT_WATCH_INTERVAL": (2.0, 86_400.0),
+    "CINESORT_CACHE_TTL": (0.0, 86_400.0),
+}
 
 # Simple validation: printable ASCII, no whitespace, reasonable length.
 # Prevents storing obviously bogus or injection-risky values.
@@ -55,9 +76,17 @@ _LANG_RE = re.compile(r'^[a-z]{2}(-[A-Z]{2})?$')
 
 
 def _validate_for(key: str, value: str) -> bool:
-    """Per-key validation rule (API keys vs. the short language code)."""
+    """Per-key validation rule (API keys, the language code, numeric knobs)."""
     if key == "TMDB_LANGUAGE":
         return bool(_LANG_RE.fullmatch(value))
+    if key == "CINESORT_TRAY":
+        return value in ("0", "1")
+    if key in _NUMERIC_KEYS:
+        low, high = _NUMERIC_KEYS[key]
+        try:
+            return low <= float(value) <= high
+        except (TypeError, ValueError):
+            return False
     return bool(_KEY_RE.match(value))
 
 

@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.5.1-green.svg)
+![Version](https://img.shields.io/badge/version-1.6.0-green.svg)
 
 ---
 
@@ -37,6 +37,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 
 ### Core
 - **Smart Detection** — Automatically detects movies and TV shows from filenames (season, episode, year, quality tags, release group)
+- **Folder-aware detection** — In Plex/Jellyfin/Sonarr layouts (`Show Name (Year)/Season NN/…`) the show name, year and season are read from the folders, so files named only `S01E01.mkv`, `E01.mkv` or `01.mkv` still match as episodes of the right series. A bare number is only an episode inside a season folder — `300.mkv` stays the film.
 - **Multi-Source Metadata** — TMDb, TVMaze, and OMDb (IMDb), merged and ranked by confidence
 - **Flexible Renaming** — Template-based naming with a **live preview** and a click-to-copy token reference in Settings, including flat in-place mode
 - **Rename In-Place** — Rename files without moving them — works on NAS/SMB shares
@@ -101,20 +102,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.5.1_amd64.deb # arm64: cinesort_1.5.1_arm64.deb
+sudo dpkg -i cinesort_1.6.0_amd64.deb # arm64: cinesort_1.6.0_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.5.1.x86_64.rpm # arm64: cinesort-1.5.1.aarch64.rpm
+sudo dnf install ./cinesort-1.6.0.x86_64.rpm # arm64: cinesort-1.6.0.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.5.1.AppImage # arm64: CineSort-1.5.1-arm64.AppImage
-./CineSort-1.5.1.AppImage
+chmod +x CineSort-1.6.0.AppImage # arm64: CineSort-1.6.0-arm64.AppImage
+./CineSort-1.6.0.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -226,6 +227,8 @@ Restart the app for changes to take effect when editing the file manually.
 
 ### Volume Mounts
 
+> **Reflink copy in Docker:** a reflink cannot cross filesystems, so the source and destination must be inside the *same* mounted volume — two separate `-v` mounts will fail even if both are btrfs on the host.
+
 | Mount | Purpose |
 |-------|---------|
 | `/data` | Rename history and configuration (persist this!) |
@@ -263,7 +266,8 @@ volumes:
 - Click **Browse**:
   - **Desktop (deb/AppImage):** opens your native OS picker — choose folders or files anywhere on the machine
   - **Docker / web:** opens the in-app browser — shortcuts sidebar, editable path/breadcrumb, type-ahead filter, "media only" toggle, and checkbox multi-select that **persists across folders**; navigate with ↑/↓, Space to select, Enter to open, Backspace to go up
-- Toggle **Recursive** to include sub-folders
+- Toggle **Subfolders** to include sub-folders
+- Release samples (`*.sample.mkv`, anything under a `Sample/` folder) and media-server extras folders (`Extras`, `Featurettes`, `Behind The Scenes`, `Deleted Scenes`, `Trailers`, `Interviews`, `Scenes`, `Shorts`, `Other`) are **skipped by default** — a 60-second sample matches the same record as its feature and collides with it. The status line says how many were left out; tick **Samples & extras** to include them. Naming a sample directly, or scanning an extras folder itself, always returns it.
 - Click **Scan**
 - **Start over any time:** hover the CineSort logo/name in the top-left corner — a "Start over" hint appears; clicking it clears the file list, matches, and selections so you can begin a fresh session without removing files one by one
 
@@ -295,7 +299,50 @@ When a file shows **No match found** in the right pane:
 | **Anime** | `{n}/{n} - {absolute} - {t}` | Absolute-numbered anime |
 | **Flat** | `{n} - {s00e00} - {t}` | Rename in-place, no folders |
 
-Or build your own: type tokens directly — the **tokens** link beside the template field opens the full click-to-copy reference (Settings → Template tokens) — and a **live preview** shows the resulting path for the first file as you edit. Available tokens: `{n}`, `{y}`, `{s}`, `{e}`, `{s00e00}`, `{t}`, `{absolute}`, `{source}`, `{vf}`, `{group}`, `{codec}`, `{audio}`, `{edition}`, `{tmdbid}`, `{imdbid}`. Empty tokens collapse cleanly — `{n} ({y}) [{edition}]` renders as `Movie (2010) [Extended]` for an extended cut and plain `Movie (2010)` otherwise, matching Jellyfin/Plex edition naming. The id tokens enable agent hints like `{n} ({y}) [imdbid-{imdbid}]`: `{tmdbid}` is set only for TMDb matches and `{imdbid}` only for OMDb/IMDb matches (TVmaze ids are TVmaze-internal and map to neither); an empty id collapses the whole `[imdbid-…]` hint. `{id}` keeps its source-dependent value for existing templates.
+Or build your own: type tokens directly — the **tokens** link beside the template field opens the full click-to-copy reference (Settings → Template tokens) — and a **live preview** shows the resulting path for the first file as you edit, naming any token it does not recognise instead of leaving it in the name.
+
+<!-- tokens:start -->
+| Token | Meaning | Example |
+|---|---|---|
+| **Every match** | | |
+| `{n}` | Series or movie name | `Breaking Bad` |
+| `{name}` | Series or movie name (same as {n}) | `Breaking Bad` |
+| `{y}` | Year | `2008` |
+| `{year}` | Year (same as {y}) | `2008` |
+| `{t}` | Episode title, movie title, or track title | `Pilot` |
+| `{title}` | Same as {t} | `Pilot` |
+| `{id}` | Database id of the matched record (source-dependent) | `1396` |
+| `{tmdbid}` | TMDb id — empty unless the match came from TMDb | `1396` |
+| `{imdbid}` | IMDb id — films via OMDb/TMDb, series via TMDb/TVmaze | `tt0903747` |
+| **TV series** | | |
+| `{s}` | Season number | `1` |
+| `{e}` | Episode number | `5` |
+| `{s00}` | Season number, zero-padded | `01` |
+| `{e00}` | Episode number, zero-padded | `05` |
+| `{s00e00}` | S01E05 — range-aware for multi-episode files | `S01E05` |
+| `{e_end}` | Last episode of a multi-episode file | `6` |
+| `{absolute}` | Absolute episode number (anime) | `42` |
+| `{d}` | Air date | `2008-01-20` |
+| **Video files** | | |
+| `{source}` | Release source | `WEB-DL` |
+| `{vf}` | Video format / resolution | `1080p` |
+| `{quality}` | Same as {vf} | `1080p` |
+| `{group}` | Release group | `GROUP` |
+| `{codec}` | Video codec | `x265` |
+| `{audio}` | Audio codec | `DTS-HD` |
+| **Movies** | | |
+| `{edition}` | Edition tag — empty when none | `Extended` |
+| `{part}` | Part number of a split release — empty when single | `2` |
+| `{partN}` | " - Part 2" for a split release — empty otherwise | ` - Part 2` |
+| `{collection}` | TMDb franchise name — empty when the film is standalone | `Iron Man Collection` |
+| `{collectionN}` | Franchise name plus "/" — nests franchise films one folder deeper, standalone films unchanged | `Iron Man Collection/` |
+| **Music** | | |
+| `{artist}` | Track artist | `Radiohead` |
+| `{album}` | Album title | `OK Computer` |
+| `{track}` | Track number, zero-padded | `03` |
+<!-- tokens:end -->
+
+Empty tokens collapse cleanly — `{n} ({y}) [{edition}]` renders as `Movie (2010) [Extended]` for an extended cut and plain `Movie (2010)` otherwise, matching Jellyfin/Plex edition naming. The id tokens enable agent hints like `{n} ({y}) [imdbid-{imdbid}]`: `{tmdbid}` is set for TMDb matches, and `{imdbid}` is set for films matched via OMDb **and for series** (TMDb's external ids, or TVmaze's own — previously TV always rendered an empty hint). TVmaze's internal show ids still map to neither token; an empty id collapses the whole `[imdbid-…]` hint. `{id}` keeps its source-dependent value for existing templates.
 
 ### 5. Choose an action
 
@@ -325,14 +372,173 @@ Set **Destination** in the options card to build template paths under a target f
 - Results are shown immediately; failures include the reason
 - All operations are recorded in **History** (top-right button) with per-operation **Undo**
 
+### Music libraries
+
+`Artist/Album (Year)/03 Title.flac` is the layout every ripper writes, and for most libraries the album name exists **only** in the folder. CineSort now reads it: the parent folder supplies the album (and its year), the grandparent the artist, and a bare `01 Title` / `01. Title` stem gives the track number. The artist also goes into the MusicBrainz query, which is the difference between the right recording and a random cover version.
+
+A folder name that is a library root or a format bucket (`Music`, `Downloads`, `flac`, `Various Artists`…) is never taken as an artist or album.
+
+MusicBrainz's answer still wins when it comes from a studio album — that spelling is canonical. When its top hit is a live set or a compilation that merely contains the track, your folder wins instead of being overwritten with `Unknown Album`.
+
+**Album art travels with the tracks.** When a **Move** empties an album folder of audio, `cover.jpg` / `folder.jpg` / `front.jpg` move to the new album folder and are recorded in History, so **Undo** puts them back. Art stays put if any track stayed behind, if the action was a copy or a link, or if the destination already has its own.
+
+### Subtitles without their video
+
+A folder of `.srt` files — subtitles downloaded after the videos were already renamed and moved — now matches on its own. Previously every row read *"Subtitle skipped — companion video not in this batch"*, because subtitles were only ever renamed by copying a matched video's name.
+
+When the video **is** in the batch, nothing changes: it still supplies the name, the score and its pinned flag, exactly as before. Only subtitles with no companion take the new path, and two videos claiming the same episode still refuse the subtitle rather than guess.
+
+### Subtitle language tags
+
+Subtitle suffixes are rewritten to the ISO-639-1 code Plex and Jellyfin index on, with flags after the language: `.eng` → `.en`, `.English` → `.en`, `.German` → `.de`, `.forced.eng` → `.en.forced`, `.hi`/`.cc` → `.sdh`. Previously `.English` was not recognised at all and the language was **lost** on rename.
+
+Anything unrecognised is left exactly as it was — a region subtag like `.en-US`, an unknown word, or a bare `.hi` (Hindi or hearing-impaired? CineSort will not guess). A trailing word that is not a known language, such as `Show.S01E01.Pilot.srt`, is treated as part of the name and never moved.
+
+### Film collections
+
+The **Film (collections)** preset (`{collectionN}{name} ({year})/{name} ({year}){partN}`) nests franchise films under their TMDb collection folder and leaves standalone films exactly where they were:
+
+```
+Iron Man Collection/Iron Man (2008)/Iron Man (2008).mkv
+Inception (2010)/Inception (2010).mkv
+```
+
+`{collection}` is the franchise name on its own; `{collectionN}` adds the trailing slash so one template serves both cases. The name is TMDb's verbatim, which is what Plex's collection agent matches on.
+
+TMDb keeps a film's collection — and its IMDb id — on the full movie record rather than in search results, so reading either costs one extra request per film. CineSort fetches it **only when your template mentions `{collection}`, `{collectionN}` or `{imdbid}`**: the default preset pays nothing for tokens you never typed. A side effect worth knowing: `{imdbid}` now resolves for TMDb-matched films too, not just OMDb ones.
+
+### Split (multi-part) movies
+
+A film delivered as `Movie.2010.CD1.mkv` / `CD2.mkv` used to render one destination twice — one part was skipped, or renamed `Movie (2010) (2).mkv`, which no media server stacks back into a single entry. `CD1`, `Part1`, `pt2`, `Disc 1` and `Disk 2` are now detected and exposed as `{part}` / `{partN}`; the **Film** preset uses `{partN}`, so the parts land as `Movie (2010) - Part 1.mkv` and `- Part 2.mkv` and Plex/Jellyfin play them as one film. Single-file releases are unaffected — the token renders empty.
+
+`Part` is only read as a part number when it follows the year: in `Harry.Potter.and.the.Deathly.Hallows.Part.1.2010.mkv` it belongs to the title, and CineSort leaves it there.
+
+### Finding a title by IMDb ID
+
+Search metadata accepts a `tt…` ID directly. It used to require an OMDb key to even start; now whichever provider you have answers — OMDb for the richest record, TMDb for films and shows, and **TVmaze with no key at all** for series. A keyless deployment can resolve a show by ID and rename its episodes.
+
+### Tray mode (desktop)
+
+Watch folders only run while CineSort is running, so on the desktop packages closing the window used to stop them — while the Docker image organizes 24/7. Settings → **Keep running in the tray when the window is closed** closes that gap: the window hides to a tray icon, the backend and its watch loop keep going, and the tray menu offers **Open CineSort**, the active watch count, **Pause watching** and **Quit**.
+
+It is **off by default**. Turning it on means a local HTTP server on `127.0.0.1` stays alive after you close the window — the tray icon is there so that is never invisible, and **Quit** from the tray stops both the app and the backend.
+
+**Pause watching** is a runtime pause: your saved rules are untouched, so a restart resumes watching. It never silently disables the rules you configured.
+
+> **GNOME users:** GNOME has no built-in tray. Install the *AppIndicator and KStatusNotifierItem Support* extension to see the icon. The deb and rpm packages depend on `libayatana-appindicator3-1` / `libayatana-appindicator-gtk3`; for the AppImage, install the equivalent package for your distribution.
+
+### Cancelling a long scan or match
+
+A **Cancel** button appears in the status bar while a scan or match is running. It is needed most for music — MusicBrainz mandates one request per second, so a few hundred tracks is several minutes — and for a recursive scan pointed at the wrong folder on a NAS.
+
+Cancelling a **match** keeps everything already matched; the files it never reached are listed as *"Cancelled before matching"* so nothing silently disappears from the list. Cancelling a **scan** discards the partial walk rather than presenting half a folder as the whole one.
+
+Watch-folder runs are unaffected — they have their own progress state, so stopping an interactive job never quietly stops the background organizer.
+
+### Reflink copy (btrfs / XFS / ZFS)
+
+**Reflink copy** clones a file copy-on-write: instant, no extra disk space, and — unlike a hard link — the two files are **independent**, so editing one does not change the other. It is the "keep seeding the original, organize a copy into the library" workflow at zero cost.
+
+It needs a filesystem that supports reflinks (btrfs, XFS with `reflink=1`, ZFS, APFS) **and** both files on the *same* filesystem. On ext4, SMB or exFAT it fails immediately with a message naming what to use instead — it never silently falls back to a full byte copy, because a user who chose it to avoid duplicating 40 GB would otherwise spend it without being told.
+
+Available as a rename action and as a watch-rule action; **Undo** removes the clone, exactly like an ordinary copy.
+
+### Fixing a whole season's episode numbers
+
+Anime rips use absolute numbering (`Show - 105.mkv`) and some packs are numbered `E101`+ or start at `E00`, so an entire season lands on the wrong episode. Right-click any episode row → **Shift episode numbers…**, give an offset (and optionally a target season), and every file in that detection group is renumbered and re-matched in one step.
+
+The dialog tells you the current range and suggests the offset that starts the group at E1. An offset that would produce episode 0 or lower is refused before anything changes.
+
+### Quality upgrades
+
+When a rename lands on a file you already have, CineSort now shows both sides — `existing 720p · BluRay · 1.4 GB → incoming 2160p · BluRay · 18.2 GB` — because it already knew them. Alongside **Rename → (2)** and **Skip** there is **Replace (upgrade)**, and a **Prefer higher quality** checkbox that applies it to every conflict where the incoming resolution is strictly higher.
+
+**Replace never deletes.** The existing file is moved aside as `Movie (2010).replaced-20260906-143012.mkv` in the same folder, both moves are recorded in one history batch, and **Undo** restores the original layout exactly. If the replacement itself fails, the old file is put straight back.
+
+The sweep compares **resolution only**. A 2160p re-encode can be smaller than a 1080p remux, so sizes are shown to you but never used to decide on your behalf.
+
+### History as an audit trail
+
+Every rename now records **what CineSort decided**, not just what it did: the matched title, season/episode or year, the provider and its id, the confidence score, and the template used. The History dialog shows it under each row — `Breaking Bad · S01E01 · tmdb 1396 · 0.97` — so "why is this file called that?" has an answer months later.
+
+Two things follow from storing it:
+
+- **Export CSV** writes every field, including the match reasoning, for spreadsheets or feeding another tool. The log keeps the last 1000 operations; the export is how you keep a permanent record.
+- **Re-apply** re-renders a past rename under your *current* template — computed entirely from what was stored, so **no provider is contacted** and it works with no API keys at all. The rename itself goes through the normal path, so it is undoable like any other.
+
+Entries written before this update have no stored reasoning; they still load, and Re-apply simply is not offered for them.
+
+### Shared presets and options
+
+The template, action, destination, subfolder/sample toggles and your **custom presets** are stored on the server (`prefs.json`, beside your watch rules) as well as in the browser. One CineSort instance therefore behaves like one app: presets built on the desktop are there on the laptop, and a fresh browser or a cleared cache inherits them instead of starting from defaults. On Docker they live on the `/data` volume and survive redeploys.
+
+The browser copy is still written first, so the options card never waits on a request and keeps working if the backend is unreachable. **Theme and the last-scanned path stay on the device** — they describe where you are sitting, not how you organize your library.
+
+Watch rules gain a **Preset…** dropdown that fills the template field. The rule still stores the resolved template, so editing a preset later never silently repoints a rule built from it.
+
+### Matching & performance settings
+
+Settings → **Matching & performance** exposes four knobs that were previously environment-variable-only, and therefore unreachable on the desktop packages (a `.desktop` launcher passes no environment):
+
+| Setting | Meaning | Default |
+|---|---|---|
+| Weak-match warning | Rows below this score are flagged as weak for review | `0.4` |
+| Auto-rename threshold | Watch folders never rename below this score | `0.6` |
+| Watch interval | Seconds between watch-folder checks | `60` |
+| Metadata cache | How long provider responses are reused; `0` disables | `900` |
+
+Changes apply to the next match — no restart. Values are stored in `keys.env` alongside your API keys.
+
+**Precedence is unchanged:** an environment variable still wins over the saved value on every restart, so a Docker admin's `docker-compose.yml` is never overridden by a click in the UI. When a knob is set that way the card says so, instead of showing a field that would silently not take effect.
+
+### Remembered matches
+
+When several shows or films share a title, CineSort asks once. The record you pick is remembered (`aliases.json`, beside your watch rules), so every later match of that title resolves to it silently — including watch-folder runs, which is what finally makes "match it once, then it stays automatic" true. Settings → **Remembered matches** lists them with a **Forget** button; forgetting one brings the prompt back.
+
+Only picks *you* make are remembered — an automatic match never teaches itself, so a wrong guess can never become self-renewing.
+
 ### Watch folders (auto-organize)
 
 Settings → **Watch folders** turns CineSort into a hands-off pipeline: define up to 10 rules — folder, metadata source, naming template, action (Move/Copy/Hard Link/Symlink/Move + Keep Link), optional destination — and every enabled folder is checked once a minute (`CINESORT_WATCH_INTERVAL` to tune). New media files are picked up only after their size has settled across two checks (a half-copied download never moves), matched headlessly, and renamed **only at high confidence** (at/above the review threshold). Every run is a normal history batch — undo it from History like any manual rename. The card shows each rule's recent activity.
+
+Each rule carries its own intent. Behind **Advanced** on a rule: **Subfolders** (recurse or stay at the top level), **Media** (organize only TV, only movies, only music, or any combination), **Samples & extras** (off by default — see above), and **Min confidence** (leave blank to follow the app-wide review threshold, or demand more before this rule touches your library). The activity log names the threshold that held a file, so "nothing safe to organize" is never a mystery.
 
 What is deliberately left in place, with the reason in the activity log:
 - **Ambiguous titles** (several same-named shows) — match the show once manually; automation resumes after
 - **Low-confidence and unmatched files** — nothing renames below the review threshold, ever
 - **Docker:** watched folders and destinations must be mounted volumes; rules live on `/data` and survive container updates. **Desktop:** watches run while CineSort is open.
+
+### Command line (headless)
+
+The same scan → match → rename pipeline the UI drives, without a browser — for cron, systemd timers or a quick dry run over SSH.
+
+```bash
+python -m app.cli scan   ~/Downloads                       # what CineSort detects, no provider calls
+python -m app.cli match  ~/Downloads --show-id 1396 --show-name "Breaking Bad"
+python -m app.cli rename ~/Downloads --destination /media/TV --action move --yes
+python -m app.cli watch  --once                            # run the saved watch rules one pass and exit
+```
+
+Useful flags: `--json` (machine-readable on stdout, notes on stderr — pipe straight into `jq`), `--action test` for a dry run, `--min-confidence`, `--template`, `--write-sidecars`, `--skip-conflicts`. Renames are recorded as normal history batches, so **Undo** in the UI works on them afterwards.
+
+Exit codes: `0` all good · `1` error or aborted · `2` something unmatched or failed · `3` ambiguous (re-run with `--show-id` / `--movie-id`, which the output lists).
+
+Renaming refuses to run unattended without `--yes` when stdin is not a terminal, so a cron job can never half-organize a library on a prompt nobody answered.
+
+**Per install type:**
+
+```bash
+# Docker
+docker exec cinesort python -m app.cli rename /media/incoming --yes --json
+
+# deb / rpm (a shim is installed alongside the app)
+cinesort-cli match ~/Downloads
+
+# AppImage
+./CineSort-1.6.0.AppImage --cli match ~/Downloads
+```
+
+`CINESORT_SCOPE_TO_BROWSE_ROOTS=1` confines the CLI to the same allow-list it confines the HTTP API to — it is not a way around that setting.
 
 ### Change the theme
 
@@ -545,6 +751,47 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.6.0
+
+**Files that never matched before**
+
+- **Folder-aware detection** — in Plex/Jellyfin/Sonarr layouts (`Show Name (Year)/Season NN/…`) the show, year and season are now read from the folders. Files named only `S01E01.mkv`, `E01.mkv` or `01.mkv` used to be grouped under the title "Season 01" — or, for `E01.mkv`, classified as a *movie* — and could never rename correctly. A bare number is still only an episode inside a season folder, so `300.mkv` stays the film.
+- **Subtitles without their video** — a folder of `.srt` files downloaded after the videos were already renamed now matches on its own. Every row used to read "companion video not in this batch". When the video *is* present nothing changes: it still supplies the name and the score.
+- **Split (multi-part) movies** — `CD1`/`CD2`, `Part1`, `pt2`, `Disc 1` are detected and exposed as `{part}` / `{partN}`; the **Film** preset renders them as `- Part 1` / `- Part 2` instead of colliding on one destination. "Part" is only read as a part number *after* the year, so *Harry Potter and the Deathly Hallows Part 1* keeps its title.
+- **Music from the folder layout** — `Artist/Album (Year)/03 Title.flac` now yields the artist, album, track and year, which for most libraries exist nowhere else. The artist also reaches MusicBrainz, which is the difference between the right recording and a random cover version. Album art (`cover.jpg`, `folder.jpg`…) moves with the tracks and is restored by Undo.
+- **Episode numbers you can fix in bulk** — anime absolute numbering and packs numbered `E101`+ put a whole season on the wrong episode. Right-click a row → **Shift episode numbers…**, give an offset and optional season, and the group is renumbered and re-matched in one step.
+
+**Matches that stick**
+
+- **Remembered matches** — the show or film you pick when asked is remembered, so the same title never asks again, and watch folders finally deliver the "match it once, then it stays automatic" they have always promised. Settings → **Remembered matches** lists them with a **Forget** button. Only picks *you* make are remembered — an automatic match never teaches itself.
+- **A pick now outranks detection** — choosing a film for a file misdetected as a series (or the reverse) used to be discarded, which was exactly the case the override existed for.
+- **`{imdbid}` works for series** — the Jellyfin/Plex agent hint `[imdbid-…]` rendered empty for every TV file. An IMDb ID also resolves through TVmaze now, so a deployment with no API keys at all can still find a show by ID.
+- **`{collection}`** — a new **Film (collections)** preset groups franchise films under their TMDb collection folder and leaves standalone films where they are.
+
+**Control over what happens**
+
+- **Cancel a running scan or match** — a Cancel button in the status bar. Cancelling a match keeps everything already matched; the rest are listed as cancelled rather than vanishing.
+- **Quality-aware conflicts** — when a rename lands on a file you already have, both sides are shown (`existing 720p · 1.4 GB → incoming 2160p · 18.2 GB`) with a **Replace (upgrade)** option. The existing file is moved aside as `.replaced-<timestamp>`, never deleted, and Undo restores it.
+- **Samples and extras are skipped** — release samples and `Extras`/`Featurettes` folders no longer collide with the feature they belong to. A toggle includes them.
+- **Per-rule watch settings** — each watch rule gets its own subfolder, media-type, samples and minimum-confidence settings behind **Advanced**.
+- **Matching & performance settings** — the confidence thresholds, watch interval and metadata cache are editable in Settings. They were environment-variable-only, which the desktop packages have no way to set.
+- **Tray mode (desktop)** — closing the window can now minimize to the tray so watch folders keep running, instead of stopping the moment you close it. Off by default.
+
+**Metadata that travels with your files**
+
+- **`.nfo` + poster sidecars** — optionally write Kodi/Jellyfin metadata and poster art beside each renamed file, so the ids CineSort matched are the ids your media server uses.
+- **Subtitle language tags are normalized** — `.eng` and `.English` both become `.en`, with flags after the language (`.en.forced`). `.English` was previously not recognised at all and the language was lost on rename.
+- **History remembers why** — each entry records the matched title, provider and id, confidence and template. Export the whole log as CSV, or **Re-apply** a past match under a new template without contacting any provider.
+
+**Everything else**
+
+- **A command line** — `python -m app.cli scan|match|rename|watch` for cron and SSH, on every install type (`cinesort-cli` on deb/rpm, `--cli` for the AppImage, `docker exec` for Docker).
+- **Shared presets and options** — templates, options and custom presets are stored on the server as well as the browser, so one CineSort instance behaves like one app across every device pointing at it.
+- **Reflink copy** — an instant, space-free, *independent* copy on btrfs/XFS/ZFS.
+- **Long shows match ~4× faster** — season fetches now run concurrently (a 39-season show went from 4.4 s to 1.2 s).
+- **One version number** — the version lived in five hand-edited places and two had already drifted; MusicBrainz was being told this was CineSort 1.4.2. A test now fails if they disagree.
+- **A complete token reference** — every `{token}` in one table, served to the UI and the README from the same source. Seven working tokens were undocumented, and the **Anime** preset's `{absolute}` silently rendered as nothing on rename while the live preview claimed otherwise.
 
 ### v1.5.1
 - **Picking a show by IMDb ID no longer fails silently** — selecting the right title (by IMDb ID or from the "which one is it?" dialog) could leave every file unmatched with nothing on screen to explain it. The backend was erroring out: TMDb returns a show's year as text while everything else uses a number, and comparing the two crashed the whole request, so all files failed at once — not just the one being matched. Selecting a show now works, and a stray value from a provider can no longer take down an entire match.

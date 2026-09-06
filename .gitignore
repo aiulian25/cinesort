@@ -28,7 +28,11 @@ dist/
 squashfs-root/
 extracted/
 decompiled/
-tools/
+# tools/ collects decompiler output — but the token-table generator lives there
+# and tests/test_formatter.py runs it, so it must be tracked. A negation cannot
+# re-include from an excluded DIRECTORY, hence "tools/*" rather than "tools/".
+tools/*
+!tools/gen_token_table.py
 META-INF/
 net/
 # build/ and electron/ are Electron source — tracked intentionally

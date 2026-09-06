@@ -15,9 +15,13 @@ import httpx
 from dataclasses import dataclass
 from typing import Optional
 
+from app import __version__
+
 
 API_BASE = "https://musicbrainz.org/ws/2"
-USER_AGENT = "CineSort/1.4.2 (https://github.com/aiulian25/cinesort)"
+# MusicBrainz blocks clients whose UA does not identify a real application
+# and version — it must track the shipped build, never a frozen literal.
+USER_AGENT = f"CineSort/{__version__} (https://github.com/aiulian25/cinesort)"
 MIN_REQUEST_INTERVAL = 1.0   # seconds — MusicBrainz hard rate limit
 
 

@@ -8,9 +8,15 @@
 ARG PYTHON_VERSION=3.11
 FROM python:${PYTHON_VERSION}-slim
 
+# Version comes from app/__init__.py via the npm docker:build / docker:release
+# scripts (--build-arg APP_VERSION=$npm_package_version). A plain `docker build .`
+# is labelled "dev" rather than a stale release number; the RUN check below
+# refuses any non-dev label that disagrees with the code being copied in.
+ARG APP_VERSION=dev
+
 LABEL maintainer="CineSort <app@cinesort.local>"
 LABEL description="Professional media file organizer with smart metadata matching"
-LABEL version="1.5.1"
+LABEL version="${APP_VERSION}"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -54,6 +60,12 @@ COPY app/ ./app/
 
 # Copy application icon
 COPY app/CineSort.png ./app/
+
+# The image label is metadata a user (and `docker inspect`) trusts; fail the
+# build rather than ship one that disagrees with the code above it.
+RUN [ "$APP_VERSION" = "dev" ] || \
+    python -c "import sys, app; sys.exit(0 if app.__version__ == '$APP_VERSION' else 1)" || \
+    { echo "APP_VERSION=$APP_VERSION does not match app/__init__.py"; exit 1; }
 
 # Create non-root user and necessary directories
 RUN groupadd -g 1000 cinesort && \

@@ -9,6 +9,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     pickPaths: (opts) => ipcRenderer.invoke("dialog:open", opts),
     // Reveal a path in the OS file manager. Resolves to true if handled.
     showInFolder: (fullPath) => ipcRenderer.invoke("shell:showItem", fullPath),
+    // Downloads have no UI in the Electron renderer — the CSV export hands its
+    // URL to the OS browser instead (main.js restricts it to this backend).
+    openExternal: (url) => ipcRenderer.invoke("shell:openExternal", url),
+    // Desktop tray mode. Mirrors the saved setting into the running shell so
+    // toggling it in Settings takes effect without a restart.
+    setTray: (enabled) => ipcRenderer.invoke("tray:set", !!enabled),
     // webUtils.getPathForFile() is the Electron 32+ supported way to resolve
     // the real filesystem path from a File object dropped into the renderer.
     // We guard against failures so a broken sandbox or missing API never

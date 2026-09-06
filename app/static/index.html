@@ -89,6 +89,7 @@
                         <option value="move">Move</option>
                         <option value="keeplink">Move + Keep Link</option>
                         <option value="copy">Copy</option>
+                        <option value="reflink">Reflink copy</option>
                         <option value="hardlink">Hard Link</option>
                         <option value="symlink">Symlink</option>
                     </select>
@@ -116,6 +117,10 @@
                             Browse
                         </button>
                     </div>
+                    <label class="cb-label" style="margin-top:6px"
+                           title="Also write Kodi/Jellyfin .nfo metadata and poster art next to each renamed file">
+                        <input type="checkbox" id="write-sidecars"><span>.nfo + poster</span>
+                    </label>
                 </div>
             </div>
             <!-- Insert-token palette moved to Settings → Template tokens
@@ -125,7 +130,8 @@
                 <span class="row-label presets-label" style="margin-left:0">Presets:</span>
                 <div class="template-presets">
                     <button class="preset-btn" data-template="{name}/Season {s}/{name} - {s00e00} - {title}" title="TV Series (organise into folders)">TV</button>
-                    <button class="preset-btn" data-template="{name} ({year})/{name} ({year})" title="Movie (organise into folder)">Film</button>
+                    <button class="preset-btn" data-template="{name} ({year})/{name} ({year}){partN}" title="Movie (organise into folder; split CD1/CD2 releases become - Part 1/- Part 2)">Film</button>
+                    <button class="preset-btn" data-template="{collectionN}{name} ({year})/{name} ({year}){partN}" title="Movies grouped under their TMDb franchise folder; standalone films unchanged">Film (collections)</button>
                     <button class="preset-btn" data-template="{name}/{name} - {absolute} - {title}" title="Anime (organise into folder)">Anime</button>
                     <button class="preset-btn" data-template="{name} - {s00e00} - {title}" title="Rename in-place (no folder creation)">Flat</button>
                     <button class="preset-btn" data-template="{artist}/{album}/{track} - {title}" title="Music (organise into artist/album folders)">Music</button>
@@ -144,6 +150,7 @@
                 <input type="text" id="scan-path" class="scanbar-input" placeholder="Enter a folder path, or drag &amp; drop files here…" spellcheck="false">
             </div>
             <label class="cb-label" title="Include subfolders when scanning folders"><input type="checkbox" id="recursive" checked><span>Subfolders</span></label>
+            <label class="cb-label" title="Also scan release samples and Extras/Featurettes folders (skipped by default — a sample collides with its own feature)"><input type="checkbox" id="include-extras"><span>Samples &amp; extras</span></label>
             <button id="btn-browse" class="glass-btn" title="Browse for a folder">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -171,6 +178,7 @@
         <!-- ═══ Status ═══ -->
         <div id="status-bar" class="statusbar hidden">
             <span id="status-text"></span>
+            <button id="status-cancel" class="glass-btn hidden" title="Stop the current scan or match">Cancel</button>
             <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
         </div>
 

@@ -133,6 +133,21 @@ if [ -f "$DESKTOP" ]; then
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Headless CLI launcher ────────────────────────────────────────────────────
+# The CLI is the same Python package the app already ships; it just needs the
+# bundled interpreter and the right cwd. A generated shim keeps that knowledge
+# in the packaging layer instead of inside the application.
+CLI_BIN=/usr/bin/cinesort-cli
+if [ -x /opt/CineSort/resources/venv/bin/python3 ]; then
+  cat > "$CLI_BIN" <<'CLI_EOF'
+#!/bin/sh
+# CineSort headless CLI — installed by the cinesort package.
+cd /opt/CineSort/resources/app || exit 1
+exec /opt/CineSort/resources/venv/bin/python3 -m app.cli "$@"
+CLI_EOF
+  chmod 755 "$CLI_BIN"
+fi
+
 # Refresh icon cache and desktop database
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -f -t /usr/share/icons/hicolor/ 2>/dev/null || true

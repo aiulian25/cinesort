@@ -1,10 +1,42 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell, clipboard } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray, clipboard } = require("electron");
 const { spawn, execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const http = require("http");
 const net = require("net");
+
+// ── Headless CLI passthrough ─────────────────────────────────────────────────
+// `CineSort.AppImage --cli match ~/Downloads` runs the SAME app/cli.py every
+// other target runs; the shell's only job is knowing where the bundled
+// interpreter lives. Deliberately the first thing this file does: with no
+// --cli in argv indexOf returns -1 and nothing below changes, and running it
+// before app.whenReady() means no window, no port probe and no venv repair
+// dialog can appear in front of a terminal.
+{
+    const cliAt = process.argv.indexOf("--cli");
+    if (cliAt !== -1) {
+        const { spawnSync } = require("child_process");
+        const packagedVenv = path.join(process.resourcesPath || "", "venv", "bin", "python3");
+        const devVenv = path.join(__dirname, "..", ".venv", "bin", "python3");
+        const python = fs.existsSync(packagedVenv) ? packagedVenv : devVenv;
+        const cwd = fs.existsSync(path.join(process.resourcesPath || "", "app", "app", "main.py"))
+            ? path.join(process.resourcesPath, "app")
+            : path.join(__dirname, "..");
+
+        if (!fs.existsSync(python)) {
+            // No repair attempt: rebuilding a venv is a multi-minute side
+            // effect nobody asked a one-line command for.
+            process.stderr.write(
+                `CineSort: bundled Python not found at ${python}.\n` +
+                "Launch the app once so it can repair its runtime, then retry.\n");
+            process.exit(1);
+        }
+        const { status } = spawnSync(python, ["-m", "app.cli", ...process.argv.slice(cliAt + 1)],
+            { cwd, stdio: "inherit" });
+        process.exit(status === null ? 1 : status);
+    }
+}
 
 // ── Linux sandbox & Wayland fix ───────────────────────────────────────────────
 // Must be called BEFORE app.whenReady().
@@ -127,6 +159,20 @@ ipcMain.handle("dialog:open", async (_evt, opts = {}) => {
 ipcMain.handle("shell:showItem", (_evt, fullPath) => {
     if (typeof fullPath !== "string" || !fullPath) return false;
     shell.showItemInFolder(fullPath);
+    return true;
+});
+
+// Hand a URL to the OS browser. Constrained to this instance's own backend:
+// openExternal will happily launch any protocol handler the desktop knows, so
+// a renderer bug must not be able to turn it into "run whatever I pass you".
+ipcMain.handle("shell:openExternal", (_evt, url) => {
+    if (typeof url !== "string") return false;
+    let parsed;
+    try { parsed = new URL(url); } catch { return false; }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") return false;
+    if (PORT && parsed.port && Number(parsed.port) !== Number(PORT)) return false;
+    shell.openExternal(url);
     return true;
 });
 
@@ -1029,6 +1075,15 @@ app.whenReady().then(async () => {
 
     mainWindow.loadURL(SPLASH_URL);
 
+    // In tray mode the window is hidden, not destroyed: "closed" then never
+    // fires, mainWindow stays valid, and re-opening from the tray is instant.
+    mainWindow.on("close", (event) => {
+        if (trayEnabled && !app.isQuitting) {
+            event.preventDefault();
+            mainWindow.hide();
+        }
+    });
+
     mainWindow.on("closed", () => {
         mainWindow = null;
     });
@@ -1052,6 +1107,10 @@ app.whenReady().then(async () => {
 
     try {
         await waitForServer(serverTimeout);
+        // The backend owns the preference (one value for the shell and the
+        // page); read it once the server can answer.
+        const settings = await getBackend("/api/settings");
+        if (settings && settings.keep_in_tray) setTrayEnabled(true);
     } catch (err) {
         // Same UX family as the "Python not found" dialog: never vanish
         // silently — show WHY, and make the log one click away from a bug
@@ -1091,7 +1150,122 @@ app.whenReady().then(async () => {
     installDesktopEntry();
 });
 
+// ── Tray mode ────────────────────────────────────────────────────────────────
+// Watch folders only run while the backend lives, so on the desktop the
+// flagship background feature stopped the moment the window closed — while the
+// Docker image ran it 24/7. Tray mode closes that gap. Opt-in: the backend is
+// an HTTP server on 127.0.0.1, and keeping one alive invisibly is not something
+// to switch on for people who never asked.
+let tray = null;
+let trayEnabled = false;
+let watchesPaused = false;
+let watchCount = 0;
+let watchPollTimer = null;
+
+const WATCH_POLL_MS = 60_000;
+
+function showMainWindow() {
+    if (!mainWindow) { createWindow(); return; }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+}
+
+function buildTrayMenu() {
+    if (!tray) return;
+    const watching = watchesPaused
+        ? "Watching paused"
+        : `Watch folders: ${watchCount} active`;
+    tray.setContextMenu(Menu.buildFromTemplate([
+        { label: "Open CineSort", click: showMainWindow },
+        { type: "separator" },
+        { label: watching, enabled: false },
+        {
+            label: watchesPaused ? "Resume watching" : "Pause watching",
+            click: async () => {
+                // A runtime pause on the backend — the saved rules are never
+                // rewritten, so "pause" cannot outlive the session as
+                // "everything is disabled and I don't remember why".
+                const next = !watchesPaused;
+                if (await postBackend("/api/watch-pause", { paused: next })) {
+                    watchesPaused = next;
+                    buildTrayMenu();
+                }
+            },
+        },
+        { type: "separator" },
+        { label: "Quit CineSort", click: () => { app.isQuitting = true; app.quit(); } },
+    ]));
+    tray.setToolTip(watchesPaused ? "CineSort — watching paused" : `CineSort — ${watching}`);
+}
+
+function postBackend(pathname, body) {
+    return new Promise(resolve => {
+        const payload = JSON.stringify(body);
+        const req = http.request(
+            { host: "127.0.0.1", port: PORT, path: pathname, method: "POST",
+              headers: { "Content-Type": "application/json",
+                         "Content-Length": Buffer.byteLength(payload) } },
+            res => { res.resume(); resolve(res.statusCode === 200); });
+        req.on("error", () => resolve(false));
+        req.write(payload);
+        req.end();
+    });
+}
+
+function getBackend(pathname) {
+    return new Promise(resolve => {
+        http.get({ host: "127.0.0.1", port: PORT, path: pathname }, res => {
+            let data = "";
+            res.on("data", c => { data += c; });
+            res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
+        }).on("error", () => resolve(null));
+    });
+}
+
+async function refreshWatchState() {
+    const data = await getBackend("/api/watches");
+    if (!data) return;
+    watchCount = (data.watches || []).filter(w => w.enabled !== false).length;
+    if (typeof data.paused === "boolean") watchesPaused = data.paused;
+    buildTrayMenu();
+}
+
+function enableTray() {
+    if (tray) return;
+    // The same icon the window and the Docker image use.
+    const icon = nativeImage
+        .createFromPath(path.join(findCwd(), "app", "CineSort.png"))
+        .resize({ width: 22, height: 22 });
+    tray = new Tray(icon);
+    tray.on("click", showMainWindow);
+    buildTrayMenu();
+    refreshWatchState();
+    watchPollTimer = setInterval(refreshWatchState, WATCH_POLL_MS);
+}
+
+function disableTray() {
+    if (watchPollTimer) { clearInterval(watchPollTimer); watchPollTimer = null; }
+    if (tray) { tray.destroy(); tray = null; }
+}
+
+function setTrayEnabled(enabled) {
+    trayEnabled = !!enabled;
+    if (trayEnabled) enableTray(); else disableTray();
+}
+
+// The renderer's Settings save mirrors the value here so the change is live
+// without a restart. A boolean is the entire payload — nothing to validate
+// beyond its shape.
+ipcMain.handle("tray:set", (_evt, enabled) => {
+    setTrayEnabled(!!enabled);
+    return trayEnabled;
+});
+
 app.on("window-all-closed", () => {
+    // In tray mode the app deliberately outlives its window: quitting here
+    // would kill the very watch loop the feature exists to keep running.
+    if (trayEnabled) return;
     quitting = true;   // the backend's SIGTERM exit below is expected — no recovery
     if (pyProc) {
         pyProc.kill("SIGTERM");

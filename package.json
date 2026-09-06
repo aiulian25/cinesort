@@ -1,6 +1,6 @@
 {
   "name": "cinesort",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "CineSort - Professional media file organizer with smart metadata matching",
   "main": "electron/main.js",
   "author": {
@@ -11,9 +11,9 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --linux",
-    "docker:build": "docker build --build-arg PYTHON_VERSION=3.11 -t cinesort:latest -t cinesort:$npm_package_version .",
+    "docker:build": "docker build --build-arg PYTHON_VERSION=3.11 --build-arg APP_VERSION=$npm_package_version -t cinesort:latest -t cinesort:$npm_package_version .",
     "docker:setup": "[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ] || docker run --rm --privileged tonistiigi/binfmt --install arm64; docker buildx inspect cinesort-builder >/dev/null 2>&1 || docker buildx create --name cinesort-builder --driver docker-container --bootstrap",
-    "docker:release": "npm run docker:setup && docker buildx build --builder cinesort-builder --platform linux/amd64,linux/arm64 --build-arg PYTHON_VERSION=3.11 -t aiulian25/cinesort:$npm_package_version -t aiulian25/cinesort:latest --push .",
+    "docker:release": "npm run docker:setup && docker buildx build --builder cinesort-builder --platform linux/amd64,linux/arm64 --build-arg PYTHON_VERSION=3.11 --build-arg APP_VERSION=$npm_package_version -t aiulian25/cinesort:$npm_package_version -t aiulian25/cinesort:latest --push .",
     "gh:upload": "gh release upload v$npm_package_version dist/CineSort-$npm_package_version.AppImage dist/CineSort-$npm_package_version-arm64.AppImage dist/cinesort_${npm_package_version}_amd64.deb dist/cinesort_${npm_package_version}_arm64.deb dist/cinesort-$npm_package_version.x86_64.rpm dist/cinesort-$npm_package_version.aarch64.rpm --clobber",
     "release": "npm run build && npm run docker:release && npm run gh:upload"
   },
@@ -41,7 +41,8 @@
       "depends": [
         "libgtk-3-0", "libnotify4", "libnss3",
         "libxss1", "libxtst6", "xdg-utils",
-        "libatspi2.0-0", "libuuid1", "python3"
+        "libatspi2.0-0", "libuuid1", "python3",
+        "libayatana-appindicator3-1"
       ],
       "afterInstall": "build/postinst.sh",
       "afterRemove": "build/postrm.sh"
@@ -50,7 +51,8 @@
       "depends": [
         "gtk3", "libnotify", "nss",
         "libXScrnSaver", "libXtst", "xdg-utils",
-        "at-spi2-core", "libuuid", "python3"
+        "at-spi2-core", "libuuid", "python3",
+        "libayatana-appindicator-gtk3"
       ],
       "afterInstall": "build/postinst.sh",
       "afterRemove": "build/postrm.sh"

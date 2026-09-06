@@ -875,6 +875,26 @@ body.desktop .update-banner {
 }
 .tokens-grid .tok-item .token-btn { flex-shrink: 0; min-width: 76px; text-align: center; }
 .tokens-grid .tok-item span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#status-cancel { flex-shrink: 0; font-size: 11px; padding: 3px 10px; }
+
+.prompt-fields { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; }
+.prompt-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.prompt-field small { color: var(--txt3); font-size: 10px; }
+
+.hist-meta { color: var(--txt2); font-style: italic; }
+
+.tuning-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 8px 12px; margin-top: 6px;
+}
+.tuning-grid label {
+    display: flex; flex-direction: column; gap: 3px;
+    font-size: 11px; color: var(--txt2);
+}
+.tuning-grid input { width: 100%; }
+
+.preview-unknown { color: var(--amber, #d98e00); }
+
 .tokens-grid .tok-sub {
     grid-column: 1 / -1; margin-top: 8px;
     font-size: 10px; font-weight: 650; letter-spacing: .05em;

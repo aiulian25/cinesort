@@ -51,10 +51,22 @@ const $id = s => document.getElementById(s);
 
 const elScanPath    = $id("scan-path");
 const elRecursive   = $id("recursive");
+const elIncludeExtras = $id("include-extras");
+
+/* Scan results carry a `skipped` count (release samples and Extras folders the
+   scanner left out). Silence about them would read as files going missing. */
+function scanSummary(data) {
+    // A cancelled walk returns nothing on purpose — half a folder presented as
+    // the whole folder is worse than no answer.
+    if (data.cancelled) return "Scan cancelled — nothing was listed";
+    const found = `Found ${data.files.length} media file(s)`;
+    return data.skipped ? `${found} · ${data.skipped} sample(s)/extra(s) skipped` : found;
+}
 const elTemplate    = $id("template");
 const elSource      = $id("datasource");
 const elAction      = $id("action");
 const elDest        = $id("dest-path");
+const elWriteSidecars = $id("write-sidecars");
 const elDestBrowse  = $id("btn-dest-browse");
 
 const btnScan   = $id("btn-scan");
@@ -239,7 +251,21 @@ bannerOpenSettings.addEventListener("click", () => {
 bannerDismiss.addEventListener("click", () => keyBanner.classList.add("hidden"));
 
 /* ─── Helpers ─────────────────────────────────────────────── */
-function status(msg, pct) {
+/* Which long-running job the Cancel button would stop, or null when there is
+   nothing to stop. A scan and a match are never in flight at once — the UI
+   disables the button that starts the other one. */
+let cancellableJob = null;
+const cancelBtn = $id("status-cancel");
+
+function showCancel(job) {
+    cancellableJob = job || null;
+    if (!cancelBtn) return;
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.disabled = false;
+    cancelBtn.classList.toggle("hidden", !cancellableJob);
+}
+
+function status(msg, pct, job) {
     statusBar.classList.remove("hidden");
     statusText.textContent = msg;
     progressFill.classList.remove("loading");
@@ -248,14 +274,28 @@ function status(msg, pct) {
     } else {
         progressFill.style.width = pct + "%";
     }
+    // Only shown when a caller says what pressing it would stop; every other
+    // status() call leaves it hidden, so it can never be a dead button.
+    showCancel(job);
 }
 function statusDone(msg) {
     statusText.textContent = msg;
     progressFill.classList.remove("loading");
     progressFill.style.width = "100%";
+    showCancel(null);
     setTimeout(() => { statusBar.classList.add("hidden"); }, 2500);
 }
-function statusHide() { statusBar.classList.add("hidden"); }
+function statusHide() { statusBar.classList.add("hidden"); showCancel(null); }
+
+cancelBtn?.addEventListener("click", async () => {
+    if (!cancellableJob) return;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "Cancelling…";
+    // Cooperative: the backend stops at the next group or directory entry, so
+    // the in-flight request returns on its own with whatever it had.
+    try { await api(`/api/${cancellableJob}-cancel`, { method: "POST" }); }
+    catch { cancelBtn.disabled = false; cancelBtn.textContent = "Cancel"; }
+});
 
 function fmt(bytes) {
     if (bytes < 1024) return bytes + " B";
@@ -432,12 +472,12 @@ function showLocateDialog(filenames) {
         elScanPath.value = dir;
 
         // Use batch scan endpoint
-        status("Scanning dropped files…");
+        status("Scanning dropped files…", undefined, "scan");
         const gen = sessionGen;
         try {
             const data = await api("/api/scan-batch", {
                 method: "POST",
-                body: JSON.stringify({ paths: fullPaths }),
+                body: JSON.stringify({ paths: fullPaths, include_extras: elIncludeExtras.checked }),
             });
             if (gen !== sessionGen) return;   // user hit "start over" meanwhile
             scannedFiles = data.files;
@@ -448,7 +488,7 @@ function showLocateDialog(filenames) {
             renderGutter();
             btnMatch.disabled = scannedFiles.length === 0;
             btnRename.disabled = true;
-            statusDone(`Found ${scannedFiles.length} media file(s)`);
+            statusDone(scanSummary(data));
         } catch (err) {
             statusDone("Scan failed: " + err.message);
         }
@@ -560,6 +600,77 @@ function confirmDialog(message, { okText = "OK", cancelText = "Cancel", danger =
     });
 }
 
+/* Themed multi-field prompt, same shape and keyboard handling as
+   confirmDialog. Native prompt() is not an option twice over: this app
+   deliberately uses no native dialogs, and ELECTRON DOES NOT IMPLEMENT
+   window.prompt at all — a feature built on it would work in Docker and be
+   dead on every desktop package.
+
+   `fields` is [{name, label, value, placeholder, hint}]. Resolves to an object
+   of trimmed values, or null on cancel. */
+function promptDialog(title, fields, { okText = "OK", cancelText = "Cancel" } = {}) {
+    return new Promise(resolve => {
+        let overlay = $id("confirm-overlay");
+        if (!overlay) {
+            overlay = document.createElement("div");
+            overlay.id = "confirm-overlay";
+            overlay.className = "confirm-overlay hidden";
+            document.body.appendChild(overlay);
+        }
+        overlay.innerHTML = `
+            <div class="glass-panel confirm-box">
+                <p class="confirm-msg"></p>
+                <div class="prompt-fields"></div>
+                <p class="prompt-error" style="color:var(--red);font-size:11px;min-height:14px"></p>
+                <div class="confirm-actions">
+                    <button class="glass-btn" id="confirm-cancel">${esc(cancelText)}</button>
+                    <button class="glass-btn btn-scan" id="confirm-ok">${esc(okText)}</button>
+                </div>
+            </div>`;
+        overlay.querySelector(".confirm-msg").textContent = title;
+
+        const holder = overlay.querySelector(".prompt-fields");
+        const inputs = fields.map(field => {
+            const wrap = document.createElement("label");
+            wrap.className = "prompt-field";
+            const label = document.createElement("span");
+            label.textContent = field.label;          // textContent — never markup
+            const input = document.createElement("input");
+            input.className = "glass-input mono";
+            input.type = "text";
+            input.value = field.value != null ? String(field.value) : "";
+            if (field.placeholder) input.placeholder = field.placeholder;
+            wrap.append(label, input);
+            if (field.hint) {
+                const hint = document.createElement("small");
+                hint.textContent = field.hint;
+                wrap.appendChild(hint);
+            }
+            holder.appendChild(wrap);
+            return [field.name, input];
+        });
+
+        overlay.classList.remove("hidden");
+        const finish = (value) => {
+            overlay.classList.add("hidden");
+            document.removeEventListener("keydown", onKey, true);
+            resolve(value);
+        };
+        const submit = () => finish(Object.fromEntries(
+            inputs.map(([name, input]) => [name, input.value.trim()])));
+        const onKey = (e) => {
+            if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(null); }
+            else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); submit(); }
+        };
+        $id("confirm-ok").addEventListener("click", submit);
+        $id("confirm-cancel").addEventListener("click", () => finish(null));
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) finish(null); });
+        document.addEventListener("keydown", onKey, true);
+        inputs[0][1].focus();
+        inputs[0][1].select();
+    });
+}
+
 // Active conflicts being resolved in the dialog. Each conflict gets a
 // normalised `_origs` array (the source file(s) involved) so the inline
 // Skip / Rename-to-(2) buttons can reference them by index.
@@ -572,6 +683,33 @@ function _findIdxByOriginal(origPath) {
 function _bumpFilename(name) {
     const dot = name.lastIndexOf(".");
     return dot > 0 ? name.slice(0, dot) + " (2)" + name.slice(dot) : name + " (2)";
+}
+
+/* Resolution ranking for the "prefer higher quality" sweep. Deliberately only
+   RESOLUTION: a 2160p re-encode can be smaller than a 1080p remux, so size is
+   shown to the user but never used to decide for them. */
+const QUALITY_RANK = { "480p": 1, "576p": 1, "720p": 2, "1080p": 3, "2160p": 4, "4k": 4 };
+
+function qualityRank(info) {
+    const format = (info && info.video_format || "").toLowerCase();
+    return QUALITY_RANK[format] || 0;
+}
+
+function qualityLabel(info) {
+    const parts = [];
+    if (info.video_format) parts.push(info.video_format);
+    if (info.source) parts.push(info.source);
+    if (info.size) parts.push(fmt(info.size));
+    return parts.join(" · ") || "unknown";
+}
+
+/* A conflict the sweep may act on: an existing file this batch would replace
+   with something of strictly higher resolution. Equal or unknown never counts
+   — the user can still press Replace on the row itself. */
+function isUpgrade(c) {
+    return c.type === "file_exists" && c.existing && c.incoming
+        && _findIdxByOriginal(c.file) >= 0
+        && qualityRank(c.incoming) > qualityRank(c.existing);
 }
 
 function showConflictsDialog(conflicts) {
@@ -622,16 +760,32 @@ function renderConflictsDialog() {
         if (isDup && c._origs.filter(o => _findIdxByOriginal(o) >= 0).length >= 2) {
             html += `<button class="glass-btn" style="font-size:10px;padding:3px 8px;margin-top:6px" onclick="R.conflictKeepLargest(${ci})">Keep largest</button>`;
         }
+        // file_exists is almost always a quality upgrade, and the app knows
+        // both sides. Show them, and offer the answer the user actually wants.
+        if (!isDup && c.existing && c.incoming && _findIdxByOriginal(c.file) >= 0) {
+            html += `<div style="font-size:10px;color:var(--txt2);margin-top:6px">`;
+            html += `existing ${esc(qualityLabel(c.existing))} &nbsp;→&nbsp; incoming ${esc(qualityLabel(c.incoming))}`;
+            html += `</div>`;
+            html += `<button class="glass-btn" style="font-size:10px;padding:3px 8px;margin-top:6px" onclick="R.conflictReplace(${ci})" title="Rename over the existing file. The old one is moved aside as .replaced-… and Undo restores it — it is never deleted.">Replace (upgrade)</button>`;
+        }
         html += `</div>`;
     });
 
     html += `</div>`;
     html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">`;
-    html += `<p style="font-size:10px;color:var(--txt3);margin-bottom:8px">Skip removes the file from the rename selection. Rename → (2) appends " (2)" to the new name.</p>`;
+    const upgradable = _activeConflicts.filter(isUpgrade);
+    if (upgradable.length) {
+        html += `<label class="cb-label" style="margin-bottom:8px"><input type="checkbox" id="prefer-quality"><span>Prefer higher quality — replace ${upgradable.length} existing file(s) of lower resolution</span></label>`;
+    }
+    html += `<p style="font-size:10px;color:var(--txt3);margin-bottom:8px">Skip removes the file from the rename selection. Rename → (2) appends " (2)" to the new name. Replace moves the existing file aside as <code>.replaced-…</code> — never deleted, and Undo restores it.</p>`;
     html += `<button class="glass-btn" onclick="R.closeModal()" style="width:100%">Close</button>`;
     html += `</div>`;
 
     modalBody.innerHTML = html;
+    $id("prefer-quality")?.addEventListener("change", e => {
+        if (!e.target.checked) return;
+        _activeConflicts.filter(isUpgrade).forEach(c => R.conflictReplace(_activeConflicts.indexOf(c)));
+    });
     modalOverlay.classList.remove("hidden");
 }
 
@@ -647,7 +801,7 @@ async function handleDroppedPaths(paths) {
         return;
     }
 
-    status("Scanning dropped files…");
+    status("Scanning dropped files…", undefined, "scan");
     const gen = sessionGen;
     const ticker = startScanProgressTicker();
 
@@ -657,7 +811,7 @@ async function handleDroppedPaths(paths) {
         // the sessionGen check below, so "start over" can't be overwritten.
         const data = await api("/api/scan", {
             method: "POST",
-            body: JSON.stringify({ path: paths[0], recursive: elRecursive.checked }),
+            body: JSON.stringify({ path: paths[0], recursive: elRecursive.checked, include_extras: elIncludeExtras.checked }),
         });
         if (gen !== sessionGen) return;   // user hit "start over" meanwhile
 
@@ -669,7 +823,7 @@ async function handleDroppedPaths(paths) {
         renderGutter();
         btnMatch.disabled = scannedFiles.length === 0;
         btnRename.disabled = true;
-        statusDone(`Found ${scannedFiles.length} media file(s)`);
+        statusDone(scanSummary(data));
     } catch (err) {
         statusDone("Drop failed: " + err.message);
     } finally {
@@ -739,7 +893,42 @@ function applyTheme(name) {
     persistPrefs();
 }
 
-function persistPrefs() {
+/* Preferences live in two places on purpose.
+   localStorage is the SYNCHRONOUS mirror: it restores instantly at startup, so
+   the options card never flashes defaults while a fetch is in flight, and it
+   still works when the backend is unreachable.
+   The server copy is what makes one instance behave like one app — the Docker
+   image is the recommended NAS deployment, so "the app" is one backend with a
+   desktop browser, a laptop and a phone in front of it.
+   What stays local-only: the theme and the last-scanned path. Those describe
+   the device you are sitting at, not how you organize your library. */
+const SHARED_PREFS_DEBOUNCE_MS = 500;
+let sharedPrefsTimer = null;
+
+function sharedPrefsPayload() {
+    return {
+        datasource: elSource.value,
+        action: elAction.value,
+        template: elTemplate.value,
+        destination: elDest ? elDest.value : "",
+        subfolders: !!(elRecursive && elRecursive.checked),
+        include_extras: !!(elIncludeExtras && elIncludeExtras.checked),
+        write_sidecars: !!(elWriteSidecars && elWriteSidecars.checked),
+    };
+}
+
+function pushSharedPrefs(extra) {
+    // Fire-and-forget and debounced: typing in the template field must not
+    // issue a request per keystroke, and a failed sync is never worth an error
+    // in front of the user — localStorage already holds the value.
+    clearTimeout(sharedPrefsTimer);
+    sharedPrefsTimer = setTimeout(() => {
+        api("/api/prefs", { method: "PUT", body: JSON.stringify({ ...sharedPrefsPayload(), ...extra }) })
+            .catch(() => {});
+    }, SHARED_PREFS_DEBOUNCE_MS);
+}
+
+function persistPrefsLocal() {
     try {
         localStorage.setItem(PREFS_KEY, JSON.stringify({
             datasource: elSource.value,
@@ -747,9 +936,17 @@ function persistPrefs() {
             template: elTemplate.value,
             scanPath: elScanPath.value,
             destPath: elDest ? elDest.value : "",
+            subfolders: !!(elRecursive && elRecursive.checked),
+            includeExtras: !!(elIncludeExtras && elIncludeExtras.checked),
+            writeSidecars: !!(elWriteSidecars && elWriteSidecars.checked),
             theme: currentTheme(),
         }));
     } catch { /* storage disabled — non-fatal */ }
+}
+
+function persistPrefs() {
+    persistPrefsLocal();
+    pushSharedPrefs();
 }
 function restorePrefs() {
     let p;
@@ -762,11 +959,48 @@ function restorePrefs() {
     if (typeof p.template === "string" && p.template) elTemplate.value = p.template;
     if (typeof p.scanPath === "string" && p.scanPath) elScanPath.value = p.scanPath;
     if (elDest && typeof p.destPath === "string" && p.destPath) elDest.value = p.destPath;
+    if (elRecursive && typeof p.subfolders === "boolean") elRecursive.checked = p.subfolders;
+    if (elIncludeExtras) elIncludeExtras.checked = p.includeExtras === true;
+    if (elWriteSidecars) elWriteSidecars.checked = p.writeSidecars === true;
     applyTheme(p.theme || "dark");
+}
+
+/* Second pass: adopt whatever this INSTANCE knows, so a fresh browser inherits
+   the options and presets the user built elsewhere. Runs after the synchronous
+   restore above, and silently does nothing when the backend is unreachable. */
+async function syncPrefsFromServer() {
+    let shared;
+    try { shared = await api("/api/prefs"); }
+    catch { return; }
+    if (!shared || typeof shared !== "object") return;
+
+    if (shared.datasource && [...elSource.options].some(o => o.value === shared.datasource)) elSource.value = shared.datasource;
+    if (shared.action && [...elAction.options].some(o => o.value === shared.action)) elAction.value = shared.action;
+    if (typeof shared.template === "string" && shared.template) elTemplate.value = shared.template;
+    if (elDest && typeof shared.destination === "string" && shared.destination) elDest.value = shared.destination;
+    if (elRecursive && typeof shared.subfolders === "boolean") elRecursive.checked = shared.subfolders;
+    if (elIncludeExtras && typeof shared.include_extras === "boolean") elIncludeExtras.checked = shared.include_extras;
+    if (elWriteSidecars && typeof shared.write_sidecars === "boolean") elWriteSidecars.checked = shared.write_sidecars;
+
+    if (Array.isArray(shared.custom_presets)) {
+        saveCustomPresets(shared.custom_presets, { push: false });
+        renderCustomPresets();
+    }
+    updateActionUI();
+    updateTemplatePreview();
+    // Mirror what the server just told us, WITHOUT echoing it back. Skipping
+    // this left localStorage holding the startup defaults, so the next load
+    // with an unreachable backend would silently drop the shared template.
+    persistPrefsLocal();
 }
 restorePrefs();
 
 updateActionUI(); // run once on load (after prefs restore so it reflects the saved action)
+
+// Then adopt this instance's shared preferences, if it has any. Deliberately
+// not awaited: the UI is already usable from localStorage, and a slow or
+// absent backend must not delay it.
+syncPrefsFromServer();
 
 /* ─── Custom template presets ─────────────────────────────────
    Saved under their own localStorage key (same per-origin persistence as
@@ -789,9 +1023,12 @@ function loadCustomPresets() {
             .slice(0, CUSTOM_PRESETS_MAX);
     } catch { return []; }   // malformed storage degrades to no custom presets
 }
-function saveCustomPresets(list) {
+function saveCustomPresets(list, { push = true } = {}) {
     try { localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(list)); }
     catch { /* storage disabled — non-fatal, presets just don't persist */ }
+    // push:false when the list CAME from the server — echoing it straight back
+    // would be a pointless round trip.
+    if (push) pushSharedPrefs({ custom_presets: list });
 }
 
 function renderCustomPresets() {
@@ -955,14 +1192,14 @@ btnBrowse.addEventListener("click", () => {
 
 /* Shared: scan a list of file/folder paths and load them into the panes. */
 async function scanPaths(paths) {
-    status(`Scanning ${paths.length} item(s)…`);
+    status(`Scanning ${paths.length} item(s)…`, undefined, "scan");
     const gen = sessionGen;
     const ticker = startScanProgressTicker();
     try {
         const data = await api("/api/scan-batch", {
             method: "POST",
             // Honor the "Include subfolders" toggle for folder selections too.
-            body: JSON.stringify({ paths, recursive: elRecursive.checked }),
+            body: JSON.stringify({ paths, recursive: elRecursive.checked, include_extras: elIncludeExtras.checked }),
         });
         if (gen !== sessionGen) return;   // user hit "start over" meanwhile
         scannedFiles = data.files;
@@ -974,7 +1211,7 @@ async function scanPaths(paths) {
         btnMatch.disabled = scannedFiles.length === 0;
         btnRename.disabled = true;
         updateTemplatePreview();   // preview now has a real sample file
-        statusDone(`Found ${scannedFiles.length} media file(s)`);
+        statusDone(scanSummary(data));
     } catch (err) {
         statusDone("Scan failed: " + err.message);
     } finally {
@@ -1329,7 +1566,7 @@ async function doScan() {
     const path = elScanPath.value.trim();
     if (!path) { elScanPath.focus(); return; }
 
-    status("Scanning…");
+    status("Scanning…", undefined, "scan");
     btnScan.disabled = true;
     const gen = sessionGen;
     const ticker = startScanProgressTicker();
@@ -1337,7 +1574,7 @@ async function doScan() {
     try {
         const data = await api("/api/scan", {
             method: "POST",
-            body: JSON.stringify({ path, recursive: elRecursive.checked }),
+            body: JSON.stringify({ path, recursive: elRecursive.checked, include_extras: elIncludeExtras.checked }),
         });
         if (gen !== sessionGen) return;   // user hit "start over" meanwhile
         scannedFiles = data.files;
@@ -1350,7 +1587,7 @@ async function doScan() {
         btnRename.disabled = true;
         persistPrefs();            // remember this folder for next session
         updateTemplatePreview();   // preview now has a real sample file
-        statusDone(`Found ${scannedFiles.length} media file(s)`);
+        statusDone(scanSummary(data));
     } catch (err) {
         statusDone("Scan failed: " + err.message);
     } finally {
@@ -1424,7 +1661,7 @@ async function doMatch() {
     // from polling GET /api/match-progress once a second — the backend updates
     // a snapshot as it works through each detected group.
     const src = elSource.value.toUpperCase();
-    status(`Matching ${filesToMatch.length} file(s) against ${src}…`);
+    status(`Matching ${filesToMatch.length} file(s) against ${src}…`, undefined, "match");
     const ticker = startMatchProgressTicker();
     btnMatch.disabled = true;
     const gen = sessionGen;
@@ -1468,6 +1705,9 @@ async function doMatch() {
 
         // Status line: conflicts and/or source errors, both truthful at once.
         const suffix = [];
+        const cancelledRows = (data.results || [])
+            .filter(r => r && r.reason === "Cancelled before matching").length;
+        if (cancelledRows) suffix.push(`cancelled — ${cancelledRows} file(s) not looked up`);
         if (data.conflicts && data.conflicts.length > 0) {
             showConflictsDialog(data.conflicts);
             suffix.push(`${data.conflicts.length} conflict(s) found`);
@@ -1497,7 +1737,18 @@ async function doRename() {
         if (!selectedSet.has(i)) continue;
         const m = matchResults[i];
         if (!m || !m.matched) continue;
-        ops.push({ original: m.original, new_path: m.new_path });
+        ops.push({
+            original: m.original, new_path: m.new_path,
+            // Only read server-side when write_sidecars is on; harmless otherwise.
+            metadata: m.metadata, is_subtitle: !!m.is_subtitle,
+            // Recorded in history so the log can say WHY this file was renamed,
+            // and be re-applied later without asking a provider again.
+            confidence: m.score, datasource: m.metadata && m.metadata.datasource,
+            template: elTemplate.value,
+            // Set by the conflicts dialog: rename over the existing file,
+            // parking it rather than deleting it.
+            replace_existing: !!m.replace_existing,
+        });
     }
     if (ops.length === 0) return;
 
@@ -1509,7 +1760,10 @@ async function doRename() {
     try {
         const data = await api("/api/rename", {
             method: "POST",
-            body: JSON.stringify({ operations: ops, action }),
+            body: JSON.stringify({
+                operations: ops, action,
+                write_sidecars: !!(elWriteSidecars && elWriteSidecars.checked),
+            }),
         });
         showRenameResults(data);
         statusDone(`${data.success} succeeded, ${data.failed} failed`);
@@ -1573,6 +1827,14 @@ function showRenameResults(data) {
             <div class="res-err">${esc(r.error)}</div>`;
         }
     });
+    // Sidecars are best-effort by design (a failed poster fetch must never
+    // mark a moved file as failed), so their failures get their own block
+    // instead of being folded into the per-file rows.
+    if (data.sidecar_errors && data.sidecar_errors.length) {
+        html += `<p style="margin-top:12px;color:var(--txt2)">Sidecar files:
+            ${data.sidecar_errors.length} could not be written</p>`;
+        data.sidecar_errors.forEach(e => { html += `<div class="res-err">${esc(e)}</div>`; });
+    }
     modalBody.innerHTML = html;
     $id("res-undo-all")?.addEventListener("click", () => R.undoBatch(data.batch_id));
     // Real listeners over data.results — not inline onclick with a quoted
@@ -1899,25 +2161,129 @@ btnSettings.addEventListener("click", () => showSettings());
 /* Token reference for the Settings card. Fixed literals (never user data),
    same descriptions the palette tooltips carried — plus the music tokens the
    one-line palette never had room to show. */
-const TEMPLATE_TOKENS = [
-    { tok: "{name}", desc: "Series / movie name" },
-    { tok: "{year}", desc: "Year" },
-    { tok: "{s00e00}", desc: "S01E05 — season/episode, range-aware" },
-    { tok: "{title}", desc: "Episode title (all titles for multi-episode files)" },
-    { tok: "{absolute}", desc: "Absolute episode number (anime)" },
-    { tok: "{source}", desc: "Release source (WEB-DL, BluRay…)" },
-    { tok: "{quality}", desc: "Video quality (1080p…)" },
-    { tok: "{group}", desc: "Release group" },
-    { tok: "{codec}", desc: "Video codec (x265…)" },
-    { tok: "{audio}", desc: "Audio codec (DTS-HD…)" },
-    { tok: "{edition}", desc: "Edition (Extended…) — empty when none" },
-    { tok: "{tmdbid}", desc: "TMDb id — empty unless matched via TMDb" },
-    { tok: "{imdbid}", desc: "IMDb id — empty unless via OMDb/IMDb" },
-    { sub: "Music" },
-    { tok: "{artist}", desc: "Track artist" },
-    { tok: "{album}", desc: "Album title" },
-    { tok: "{track}", desc: "Track number, zero-padded" },
+/* The token reference comes from GET /api/tokens — the same table
+   apply_template validates against, so the palette can never list a token the
+   formatter does not know or miss one it does. Fetched once per session. */
+let tokenReference = null;
+
+async function loadTokenReference() {
+    if (tokenReference) return tokenReference;
+    try { tokenReference = await api("/api/tokens"); }
+    catch { tokenReference = []; }   // backend unreachable — grid simply empty
+    return tokenReference;
+}
+
+const TOKEN_GROUPS = [
+    ["all", "Every match"],
+    ["series", "TV series"],
+    ["video", "Video files"],
+    ["movie", "Movies"],
+    ["music", "Music"],
 ];
+
+/* An environment variable wins over keys.env on every restart, so a Settings
+   edit to such a knob would silently not survive one. Say so rather than
+   pretending the field is authoritative. */
+function envManagedTuningNote(current) {
+    const managed = current.tuning_managed_in_env || {};
+    const labels = {
+        low_confidence: "weak-match warning", review_confidence: "auto-rename threshold",
+        watch_interval: "watch interval", cache_ttl: "metadata cache",
+    };
+    const names = Object.keys(labels).filter(k => managed[k]).map(k => labels[k]);
+    if (!names.length) return "";
+    return `<p class="settings-hint" style="color:var(--amber,#d98e00)">
+        Set in this deployment's environment: ${esc(names.join(", "))}.
+        Changes here are saved but the environment value wins on restart.</p>`;
+}
+
+/* Token palette, grouped by where each token has a value. Descriptions come
+   from the backend, so they are placed with textContent — never markup. */
+async function renderTokensGrid() {
+    const grid = $id("tokens-grid");
+    if (!grid) return;
+    const tokens = await loadTokenReference();
+    if (!$id("tokens-grid")) return;   // modal changed meanwhile
+
+    grid.textContent = "";
+    TOKEN_GROUPS.forEach(([kind, label]) => {
+        const inGroup = tokens.filter(t => t.kind === kind);
+        if (!inGroup.length) return;
+        const heading = document.createElement("div");
+        heading.className = "tok-sub";
+        heading.textContent = label;
+        grid.appendChild(heading);
+        inGroup.forEach(t => {
+            const item = document.createElement("div");
+            item.className = "tok-item";
+            const button = document.createElement("button");
+            button.className = "token-btn";
+            button.dataset.tok = t.name;
+            button.textContent = t.name;
+            const description = document.createElement("span");
+            description.textContent = t.description;
+            item.append(button, description);
+            grid.appendChild(item);
+        });
+    });
+}
+
+/* Remembered matches (F2). Show/film names are user-influenced strings that
+   arrive from providers, so every one is placed with textContent — never
+   innerHTML — exactly like the watch card below. */
+async function renderAliasesCard() {
+    const slot = $id("aliases-card-slot");
+    if (!slot) return;
+    let data;
+    try { data = await api("/api/aliases"); }
+    catch { return; }   // backend unreachable — card simply absent
+    if (!$id("aliases-card-slot")) return;   // modal changed meanwhile
+
+    const mk = (tag, props = {}, style = "") => {
+        const el = document.createElement(tag);
+        Object.assign(el, props);
+        if (style) el.style.cssText = style;
+        return el;
+    };
+
+    slot.textContent = "";
+    const card = mk("div", { className: "settings-row" });
+    card.appendChild(mk("div", { className: "settings-label", textContent: "Remembered matches" }));
+    card.appendChild(mk("p", { className: "settings-hint", textContent:
+        "Shows and films you picked by hand. Matching uses them automatically, " +
+        "so watch folders keep organizing new episodes without asking again." }));
+
+    const aliases = data.aliases || [];
+    if (!aliases.length) {
+        card.appendChild(mk("p", { className: "settings-hint", textContent:
+            "Nothing remembered yet — picks made in the match dialog or Search metadata appear here." }));
+        slot.appendChild(card);
+        return;
+    }
+
+    const rows = mk("div", {}, "display:flex;flex-direction:column;gap:6px");
+    aliases.slice().reverse().forEach(a => {
+        const row = mk("div", {}, "display:flex;gap:8px;align-items:center;padding:6px 8px;" +
+            "background:var(--surface-2);border:1px solid var(--border);border-radius:6px");
+        const title = a.year ? `${a.name} (${a.year})` : a.name;
+        row.appendChild(mk("span", { textContent: title }, "flex:1;min-width:0;font-size:11px;overflow:hidden;text-overflow:ellipsis"));
+        row.appendChild(mk("span", { textContent: `${a.media} · ${a.datasource}` },
+            "font-size:10px;color:var(--txt3);flex-shrink:0"));
+        const forget = mk("button", { className: "glass-btn", textContent: "Forget" },
+            "font-size:10px;padding:3px 8px;flex-shrink:0");
+        forget.addEventListener("click", async () => {
+            forget.disabled = true;
+            try {
+                await api(`/api/aliases/${encodeURIComponent(a.key)}`, { method: "DELETE" });
+                renderAliasesCard();
+            } catch { forget.disabled = false; }
+        });
+        row.appendChild(forget);
+        rows.appendChild(row);
+    });
+    card.appendChild(rows);
+    slot.appendChild(card);
+}
 
 async function renderWatchesCard() {
     const slot = $id("watches-card-slot");
@@ -1947,7 +2313,7 @@ async function renderWatchesCard() {
 
     const rows = mk("div", {}, "display:flex;flex-direction:column;gap:8px");
     const sources = [["tmdb", "TMDb"], ["tvmaze", "TVmaze"], ["omdb", "OMDb"], ["musicbrainz", "MusicBrainz"]];
-    const actions = [["move", "Move"], ["copy", "Copy"], ["hardlink", "Hard Link"], ["symlink", "Symlink"], ["keeplink", "Move + Keep Link"]];
+    const actions = [["move", "Move"], ["copy", "Copy"], ["reflink", "Reflink copy"], ["hardlink", "Hard Link"], ["symlink", "Symlink"], ["keeplink", "Move + Keep Link"]];
 
     function addRow(w) {
         const row = mk("div", {}, "display:flex;flex-wrap:wrap;gap:6px;align-items:center;" +
@@ -1957,18 +2323,85 @@ async function renderWatchesCard() {
         const src = mk("select", { className: "glass-select" }, "font-size:11px");
         sources.forEach(([v, l]) => src.appendChild(mk("option", { value: v, textContent: l, selected: v === (w.datasource || "tvmaze") })));
         const tpl = mk("input", { className: "glass-input mono", value: w.template || elTemplate.value, placeholder: "{name}/Season {s}/…", spellcheck: false }, "flex:2;min-width:160px;font-size:11px");
+        // Presets by name. The rule still STORES the resolved template string,
+        // so watches.py is unchanged and editing a preset later cannot silently
+        // repoint a rule that was built from it.
+        const preset = mk("select", { className: "glass-select", title: "Fill the template from a preset" }, "font-size:11px;max-width:120px");
+        preset.appendChild(mk("option", { value: "", textContent: "Preset…" }));
+        // Built-ins are read from the preset buttons themselves, so the two
+        // lists cannot drift; custom ones come from the shared prefs.
+        const builtins = [...document.querySelectorAll(".template-presets .preset-btn")]
+            .map(b => ({ label: b.textContent.trim(), template: b.dataset.template }));
+        [...builtins, ...loadCustomPresets()].forEach(entry =>
+            preset.appendChild(mk("option", { value: entry.template, textContent: entry.label })));
+        preset.addEventListener("change", () => {
+            if (preset.value) tpl.value = preset.value;
+            preset.value = "";
+        });
         const act = mk("select", { className: "glass-select" }, "font-size:11px");
         actions.forEach(([v, l]) => act.appendChild(mk("option", { value: v, textContent: l, selected: v === (w.action || "move") })));
         const dest = mk("input", { className: "glass-input mono", value: w.output_dir || "", placeholder: "Destination (optional)", spellcheck: false }, "flex:2;min-width:160px;font-size:11px");
+        const nfo = mk("input", { type: "checkbox", checked: w.write_sidecars === true,
+            title: "Write .nfo + poster for files this rule organizes" });
+        const nfoLabel = mk("label", {}, "display:flex;align-items:center;gap:3px;font-size:10px;color:var(--txt2)");
+        nfoLabel.append(nfo, mk("span", { textContent: ".nfo" }));
         const rm = mk("button", { className: "glass-btn", textContent: "Remove" }, "font-size:10px;padding:3px 8px");
         rm.addEventListener("click", () => row.remove());
-        [folder, tpl, dest].forEach(shield);
-        row.append(enabled, folder, src, tpl, act, dest, rm);
-        row._collect = () => ({
-            enabled: enabled.checked, folder: folder.value.trim(),
-            datasource: src.value, template: tpl.value.trim(),
-            action: act.value, output_dir: dest.value.trim(),
+
+        // ── Advanced: what this rule will look at, and how sure it must be.
+        // Folded away because the defaults reproduce the old behaviour — a
+        // user who never opens it sees no change.
+        const check = (label, checked, title) => {
+            const box = mk("input", { type: "checkbox", checked, title });
+            const wrap = mk("label", { title }, "display:flex;align-items:center;gap:4px;font-size:10px;color:var(--txt2)");
+            wrap.append(box, mk("span", { textContent: label }));
+            return [box, wrap];
+        };
+        const [recursive, recursiveLabel] = check("Subfolders", w.recursive !== false,
+            "Scan sub-folders of this watched folder");
+        const [extras, extrasLabel] = check("Samples & extras", w.include_extras === true,
+            "Also organize release samples and Extras/Featurettes folders");
+        const typeBoxes = [["series", "TV"], ["movie", "Movies"], ["music", "Music"]].map(([value, label]) => {
+            const [box, wrap] = check(label, !w.media_types || w.media_types.includes(value),
+                `Organize ${label.toLowerCase()} found in this folder`);
+            box.dataset.mediaType = value;
+            return [value, box, wrap];
         });
+        const minConf = mk("input", {
+            className: "glass-input mono", type: "number", min: "0", max: "1", step: "0.05",
+            value: w.min_confidence != null ? String(w.min_confidence) : "",
+            placeholder: "default",
+            title: "Minimum match confidence before this rule renames anything. Blank follows the app-wide review threshold.",
+        }, "width:82px;font-size:11px");
+        const minConfLabel = mk("label", {}, "display:flex;align-items:center;gap:4px;font-size:10px;color:var(--txt2)");
+        minConfLabel.append(mk("span", { textContent: "Min confidence" }), minConf);
+
+        const advanced = mk("details", {}, "flex-basis:100%;margin-top:2px");
+        advanced.appendChild(mk("summary", { textContent: "Advanced" },
+            "font-size:10px;color:var(--txt3);cursor:pointer"));
+        const advRow = mk("div", {}, "display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px");
+        advRow.append(recursiveLabel, extrasLabel,
+            mk("span", { textContent: "Media:" }, "font-size:10px;color:var(--txt3)"),
+            ...typeBoxes.map(([, , wrap]) => wrap), minConfLabel);
+        advanced.appendChild(advRow);
+
+        [folder, tpl, dest, minConf].forEach(shield);
+        row.append(enabled, folder, src, preset, tpl, act, dest, nfoLabel, rm, advanced);
+        row._collect = () => {
+            const chosen = typeBoxes.filter(([, box]) => box.checked).map(([value]) => value);
+            return {
+                enabled: enabled.checked, folder: folder.value.trim(),
+                datasource: src.value, template: tpl.value.trim(),
+                action: act.value, output_dir: dest.value.trim(),
+                write_sidecars: nfo.checked,
+                recursive: recursive.checked,
+                include_extras: extras.checked,
+                // All three ticked is the default — send nothing rather than a
+                // list, so the rule keeps meaning "every type" if one is added.
+                media_types: chosen.length === typeBoxes.length ? null : chosen,
+                min_confidence: minConf.value === "" ? null : Number(minConf.value),
+            };
+        };
         rows.appendChild(row);
     }
     watches.forEach(addRow);
@@ -2117,6 +2550,43 @@ async function showSettings(scrollTo) {
                    maxlength="5" autocomplete="off" spellcheck="false">
         </div>
 
+        <div class="settings-row">
+            <div class="settings-label"><span>Matching &amp; performance</span></div>
+            <p class="settings-hint">
+                How sure CineSort must be before it acts, and how often it looks.
+                These applied only through environment variables before, which a
+                desktop launcher cannot pass — so they were Docker-only.
+            </p>
+            <div class="tuning-grid">
+                <label>Weak-match warning
+                    <input type="number" id="set-low-conf" class="glass-input mono"
+                           min="0" max="1" step="0.05" value="${esc(String(current.low_confidence ?? 0.4))}"
+                           title="Rows scoring below this are flagged as weak in the review list">
+                </label>
+                <label>Auto-rename threshold
+                    <input type="number" id="set-review-conf" class="glass-input mono"
+                           min="0" max="1" step="0.05" value="${esc(String(current.review_confidence ?? 0.6))}"
+                           title="Watch folders never rename below this score. Must be above the weak-match warning.">
+                </label>
+                <label>Watch interval (s)
+                    <input type="number" id="set-watch-interval" class="glass-input mono"
+                           min="10" step="10" value="${esc(String(Math.round(current.watch_interval ?? 60)))}"
+                           title="Seconds between watch-folder checks">
+                </label>
+                <label>Metadata cache (s)
+                    <input type="number" id="set-cache-ttl" class="glass-input mono"
+                           min="0" step="60" value="${esc(String(Math.round(current.cache_ttl ?? 900)))}"
+                           title="How long provider responses are reused. 0 disables caching.">
+                </label>
+            </div>
+            ${envManagedTuningNote(current)}
+            ${isElectron ? `
+            <label class="cb-label" style="margin-top:10px" title="Closing the window minimizes CineSort to the tray so watch folders keep organizing in the background">
+                <input type="checkbox" id="set-keep-tray" ${current.keep_in_tray ? "checked" : ""}>
+                <span>Keep running in the tray when the window is closed</span>
+            </label>` : ""}
+        </div>
+
         <div class="settings-row" id="tokens-card">
             <div class="settings-label"><span>Template tokens</span></div>
             <p class="settings-hint">
@@ -2124,14 +2594,13 @@ async function showSettings(scrollTo) {
                 Empty tokens collapse cleanly — brackets around them disappear
                 when there is no value.
             </p>
-            <div class="tokens-grid">${TEMPLATE_TOKENS.map(t => t.sub
-                ? `<div class="tok-sub">${t.sub}</div>`
-                : `<div class="tok-item"><button class="token-btn" data-tok="${t.tok}">${t.tok}</button><span>${t.desc}</span></div>`
-            ).join("")}</div>
+            <div class="tokens-grid" id="tokens-grid"></div>
             <div class="tokens-copied" id="tokens-copied"></div>
         </div>
 
         <div id="watches-card-slot"></div>
+
+        <div id="aliases-card-slot"></div>
 
         <div id="update-card-slot"></div>
 
@@ -2142,8 +2611,11 @@ async function showSettings(scrollTo) {
         <p id="settings-msg" style="font-size:11px;margin-top:10px;min-height:16px"></p>
         <p id="settings-version" style="font-size:11px;margin-top:4px;color:var(--txt3)"></p>`;
 
+    renderTokensGrid();
+
     // Watch-folders card (best-effort, like the update card below).
     renderWatchesCard();
+    renderAliasesCard();
 
     // Software update card + version footer (best-effort; the modal works
     // without it). One shared endpoint on every build target; only the
@@ -2245,12 +2717,33 @@ async function showSettings(scrollTo) {
         msg.textContent = "";
 
         try {
+            // A blank tuning field means "leave it alone" — the backend treats
+            // null as untouched, so an empty box can never reset a threshold.
+            const num = id => {
+                const el = $id(id);
+                return el && el.value !== "" ? Number(el.value) : null;
+            };
             const result = await api("/api/settings", {
                 method: "POST",
-                body: JSON.stringify({ tmdb_key: tmdbVal, omdb_key: omdbVal, tmdb_language: langVal }),
+                body: JSON.stringify({
+                    tmdb_key: tmdbVal, omdb_key: omdbVal, tmdb_language: langVal,
+                    low_confidence: num("set-low-conf"),
+                    review_confidence: num("set-review-conf"),
+                    watch_interval: num("set-watch-interval"),
+                    cache_ttl: num("set-cache-ttl"),
+                    // Desktop only — the control does not exist elsewhere, and
+                    // null means "leave it alone".
+                    keep_in_tray: $id("set-keep-tray") ? $id("set-keep-tray").checked : null,
+                }),
             });
+            // Apply to the running shell too, so the tray appears or goes away
+            // without a restart.
+            if (isElectron && typeof window.electronAPI.setTray === "function"
+                    && $id("set-keep-tray")) {
+                window.electronAPI.setTray($id("set-keep-tray").checked);
+            }
             msg.style.color = "var(--green)";
-            msg.textContent = "✓ Saved. Keys are active for this session.";
+            msg.textContent = "✓ Saved. Settings are active for this session.";
             saveBtn.textContent = "Saved!";
             // Hide the first-run banner once keys are saved
             if (result.tmdb_enabled) keyBanner.classList.add("hidden");
@@ -2267,6 +2760,85 @@ async function showSettings(scrollTo) {
 
 /* ─── History ─────────────────────────────────────────────── */
 btnHistory.addEventListener("click", showHistory);
+
+/* "Breaking Bad · S01E01 · tmdb 1396 · 0.97" — the reasoning behind a rename,
+   which the log used to lose the moment the dialog closed. */
+function historySummary(entry) {
+    const meta = entry.metadata;
+    if (!meta) return "";
+    const parts = [];
+    const title = meta.show || meta.title;
+    if (title) parts.push(title);
+    if (meta.season != null && meta.episode != null) {
+        parts.push(`S${String(meta.season).padStart(2, "0")}E${String(meta.episode).padStart(2, "0")}`);
+    } else if (meta.show_year || meta.year) {
+        parts.push(String(meta.show_year || meta.year));
+    }
+    const source = entry.datasource || meta.datasource;
+    const id = meta.tmdbid || meta.imdbid;
+    if (source) parts.push(id ? `${source} ${id}` : source);
+    if (entry.confidence != null) parts.push(Number(entry.confidence).toFixed(2));
+    return parts.join(" · ");
+}
+
+/* Re-render one past rename under the CURRENT template. The new path is
+   computed server-side from stored metadata — no provider call — and then goes
+   through the ordinary /api/rename, so history and undo stay the one path that
+   touches files. */
+/* A plain download in a browser. The Electron renderer has no download UI, so
+   the desktop build hands the URL to the OS browser instead — the same
+   split the update card already makes. */
+function exportHistoryCsv() {
+    const url = new URL("/api/history/export.csv", location.origin).href;
+    if (isElectron && typeof window.electronAPI.openExternal === "function") {
+        window.electronAPI.openExternal(url);
+        return;
+    }
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "cinesort-history.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+}
+
+async function reapplyHistoryEntry(entry) {
+    let plan;
+    try {
+        plan = await api("/api/history/reapply", {
+            method: "POST",
+            body: JSON.stringify({ id: entry.id, template: elTemplate.value,
+                                   output_dir: elDest?.value.trim() || null }),
+        });
+    } catch (err) {
+        status("Re-apply failed: " + err.message);
+        setTimeout(() => statusHide(), 3000);
+        return;
+    }
+    if (plan.unchanged) {
+        status("Already named that way under the current template");
+        setTimeout(() => statusHide(), 2500);
+        return;
+    }
+    const ok = await confirmDialog(
+        `Rename to "${plan.new_name}"?`, { okText: "Rename" });
+    if (!ok) return;
+    try {
+        await api("/api/rename", {
+            method: "POST",
+            body: JSON.stringify({
+                operations: [{ original: plan.original, new_path: plan.new_path,
+                               metadata: entry.metadata, template: elTemplate.value,
+                               confidence: entry.confidence, datasource: entry.datasource }],
+                action: "move",
+            }),
+        });
+        showHistory();
+    } catch (err) {
+        status("Rename failed: " + err.message);
+        setTimeout(() => statusHide(), 3000);
+    }
+}
 
 async function showHistory(limit) {
     // Called from a click listener too, where the arg is an Event — guard.
@@ -2316,11 +2888,19 @@ async function showHistory(limit) {
             if (e.success && e.action !== "test" && e.action !== "undo") {
                 h += `<button class="glass-btn" onclick="R.undoOperation('${e.id}')" style="padding:3px 10px;font-size:10px">Undo</button>`;
             }
+            // Only where there is something to re-apply FROM: entries written
+            // before rich history carry no metadata and the backend 409s.
+            if (e.metadata && e.success && e.action !== "test" && e.action !== "undo") {
+                h += `<button class="glass-btn hist-reapply" data-h="${hIdx}" style="padding:3px 10px;font-size:10px" title="Rename this file using the CURRENT template, without asking a provider again">Re-apply</button>`;
+            }
             h += `</div>`;
             h += `</div>`;
             h += `<div style="font-size:10px;color:var(--txt3);line-height:1.6">`;
             h += `<div>From: ${esc(Path.basename(e.original))}</div>`;
             h += `<div>To: ${esc(Path.basename(e.destination))}</div>`;
+            // What CineSort decided, not just what it did.
+            const why = historySummary(e);
+            if (why) h += `<div class="hist-meta">${esc(why)}</div>`;
             if (e.error) h += `<div style="color:var(--red)">Error: ${esc(e.error)}</div>`;
             h += `</div>`;
             h += `</div>`;
@@ -2366,12 +2946,17 @@ async function showHistory(limit) {
         if (entries.length === limit && limit < 1000) {
             html += `<button class="glass-btn" onclick="R.showAllHistory()" style="flex:1;font-size:11px">Show all history</button>`;
         }
+        html += `<button class="glass-btn" onclick="R.exportHistoryCsv()" style="flex:1;font-size:11px" title="Every field, including the match reasoning">Export CSV</button>`;
         html += `<button class="glass-btn" onclick="R.clearHistory()" style="flex:1;font-size:11px">Clear History</button>`;
         html += `<button class="glass-btn" onclick="R.closeModal()" style="flex:1;font-size:11px">Close</button>`;
         html += `</div>`;
+        html += `<p style="font-size:10px;color:var(--txt3);margin-top:8px">Keeps the last 1000 operations — export to keep a permanent record.</p>`;
 
         modalBody.innerHTML = html;
         // Same dispatch as the results modal's .res-act buttons.
+        modalBody.querySelectorAll(".hist-reapply").forEach(btn => {
+            btn.addEventListener("click", () => reapplyHistoryEntry(flat[Number(btn.dataset.h)]));
+        });
         modalBody.querySelectorAll(".hist-act").forEach(btn => {
             btn.addEventListener("click", (ev) => {
                 const e = flat[Number(btn.dataset.h)];
@@ -2636,10 +3221,79 @@ function createContextMenu() {
             case "edit":   R.startInlineEdit(ctxIdx); break;
             case "meta":   R.showMetadata(ctxIdx); break;
             case "clear":  R.clearManual(ctxIdx); break;
+            case "shift":  R.shiftEpisodes(ctxIdx); break;
         }
     });
     document.body.appendChild(menu);
     return menu;
+}
+
+/* Shift every episode number in one detection group.
+
+   Anime rips use ABSOLUTE numbering ("Show - 105.mkv"), and some packs start
+   at E00: the whole season lands on the wrong episode, and the only fix today
+   is editing 24 rows by hand. The backend already honours per-file
+   season/episode (MatchRequest.files), so this rewrites them and re-matches —
+   no backend change at all. */
+async function shiftEpisodes(idx) {
+    const anchor = scannedFiles[idx];
+    if (!anchor) return;
+    const groupKey = anchor.clean_name;
+    const group = scannedFiles.filter(f => f && f.clean_name === groupKey
+                                            && typeof f.episode === "number");
+    if (!group.length) {
+        status("No episode numbers to shift in this group");
+        setTimeout(() => statusHide(), 2500);
+        return;
+    }
+
+    const lowest = Math.min(...group.map(f => f.episode));
+    const highest = Math.max(...group.map(f => f.episode));
+    const answer = await promptDialog(`Shift ${group.length} episode(s) of "${groupKey}"`, [
+        { name: "offset", label: "Episode offset", placeholder: "-100",
+          hint: `Currently E${lowest}–E${highest}. Use -${lowest - 1} to start at E1.` },
+        { name: "season", label: "Season (leave empty to keep)", placeholder: "" },
+    ], { okText: "Shift & re-match" });
+    if (!answer) return;
+
+    const offset = parseInt(answer.offset, 10);
+    if (!Number.isFinite(offset)) {
+        status("Offset must be a whole number, e.g. -100");
+        setTimeout(() => statusHide(), 3000);
+        return;
+    }
+    let season = null;
+    if (answer.season !== "") {
+        season = parseInt(answer.season, 10);
+        if (!Number.isFinite(season) || season < 0) {
+            status("Season must be a whole number (0 = specials)");
+            setTimeout(() => statusHide(), 3000);
+            return;
+        }
+    }
+    // Checked BEFORE anything is written: a partially-applied shift would
+    // leave the group in a state the user cannot reason about.
+    if (lowest + offset < 1) {
+        status(`Offset would produce episode ${lowest + offset} — nothing changed`);
+        setTimeout(() => statusHide(), 3500);
+        return;
+    }
+
+    group.forEach(f => {
+        f.episode += offset;
+        if (typeof f.episode_end === "number") f.episode_end += offset;
+        if (season !== null) f.season = season;
+        // Absolute numbering is what made the file wrong; keep it from
+        // out-voting the numbers we just set.
+        f.absolute = null;
+        // The group is being re-evaluated from scratch — an earlier pinned
+        // pick should not survive a renumbering.
+        delete f.pinned;
+    });
+
+    status(`Shifted ${group.length} file(s) by ${offset >= 0 ? "+" : ""}${offset}` +
+           (season !== null ? ` into season ${season}` : "") + " — re-matching…");
+    doMatch();
 }
 
 function showContextMenu(e, idx, pane) {
@@ -2673,6 +3327,12 @@ function showContextMenu(e, idx, pane) {
         }
         if (m && m.matched && m.manual) {
             html += `<div class="ctx-item" data-act="clear">↺ Clear manual name</div>`;
+        }
+        // Only for series files that actually carry an episode number — the
+        // whole group is renumbered, so it is a group action shown on a row.
+        if (f && f.media_type === "series" && typeof f.episode === "number") {
+            html += `<div class="ctx-sep"></div>`;
+            html += `<div class="ctx-item" data-act="shift">↔ Shift episode numbers…</div>`;
         }
     }
 
@@ -2740,6 +3400,24 @@ window.R = {
         renderConflictsDialog();
         status(`Skipped ${Path.basename(orig)}`);
         setTimeout(() => statusHide(), 1500);
+    },
+    /* Replace: accept this rename over the file already on disk. The existing
+       file is MOVED aside by the backend (.replaced-<timestamp>), never
+       deleted, and both moves land in one history batch so Undo restores the
+       original layout. Marked on the match result so doRename carries it. */
+    conflictReplace(ci) {
+        const c = _activeConflicts[ci];
+        if (!c || c.type !== "file_exists") return;
+        const idx = _findIdxByOriginal(c.file);
+        if (idx < 0) return;
+        matchResults[idx].replace_existing = true;
+        selectedSet.add(idx);            // Skip may have removed it earlier
+        _activeConflicts.splice(ci, 1);
+        renderLeft();
+        renderRight();
+        renderConflictsDialog();
+        status(`Will replace ${Path.basename(c.destination)} — the existing file is kept as .replaced-…`);
+        setTimeout(() => statusHide(), 2500);
     },
     /* Keep largest: one-click duplicate triage. Keeps the biggest known
        source SELECTED and deselects the rest (Skip's mechanism, applied in
@@ -3018,17 +3696,18 @@ window.R = {
             // numeric for a title search. An OMDb series that could not be
             // resolved leaves the tt-string here — refuse honestly rather
             // than POST a string the backend would fail to use.
-            const showId = c.tmdb_id ?? c.id;
+            // TVmaze resolves a tt-ID with no API key at all, so a
+            // TMDb-less deployment gets a usable id here too.
+            const showId = c.tmdb_id ?? c.tvmaze_id ?? c.id;
             if (typeof showId !== "number") {
-                statusDone(appSettings && appSettings.tmdb_enabled
-                    ? "TMDb has no series record for that IMDb ID — search by title instead."
-                    : "Series lookup by IMDb ID needs a TMDb key — add one in Settings, or search by title.");
+                statusDone("No TV database has a series record for that IMDb ID — search by title instead.");
                 return;
             }
             // Send the source the id actually BELONGS to, not whatever the
             // Source dropdown happens to show: a TMDb id posted with
             // datasource "tvmaze" fetches a different show entirely.
-            const ds = c.tmdb_id ? "tmdb" : (c.datasource === "tvmaze" ? "tvmaze" : "tmdb");
+            const ds = c.tmdb_id ? "tmdb"
+                : (c.tvmaze_id || c.datasource === "tvmaze") ? "tvmaze" : "tmdb";
             // Whole detection group — mirrors the backend's grouping key.
             window._pendingMatchFiles = scannedFiles.filter(
                 x => x.clean_name === f.clean_name
@@ -3057,7 +3736,7 @@ window.R = {
             e.target.textContent = "Loading...";
         }
         modalOverlay.classList.add("hidden");
-        status("Matching…");
+        status("Matching…", undefined, "match");
 
         const filesToMatch = window._pendingMatchFiles || [];
         const ticker = startMatchProgressTicker();
@@ -3119,7 +3798,7 @@ window.R = {
         }
         
         modalOverlay.classList.add("hidden");
-        status(`Matching against ${showName}…`);
+        status(`Matching against ${showName}…`, undefined, "match");
 
         const filesToMatch = window._pendingMatchFiles || [];
         const ticker = startMatchProgressTicker();
@@ -3276,6 +3955,8 @@ window.R = {
         }
     },
     
+    exportHistoryCsv() { exportHistoryCsv(); },
+    shiftEpisodes(idx) { return shiftEpisodes(idx); },
     showAllHistory() {
         showHistory(1000);
     },
@@ -3572,6 +4253,14 @@ function updateTemplatePreview() {
             path.className = "preview-path";
             path.textContent = data.preview ? "→ " + data.preview : "";
             el.append(badge, path);
+            // An unrecognised token renders as literal text in the name, which
+            // reads as a bug rather than a typo — say which one.
+            if (data.unknown && data.unknown.length) {
+                const warning = document.createElement("span");
+                warning.className = "preview-unknown";
+                warning.textContent = "  ⚠ unknown: " + data.unknown.map(t => `{${t}}`).join(" ");
+                el.appendChild(warning);
+            }
         } catch (err) {
             el.textContent = "⚠ " + err.message;
             el.classList.add("preview-error");

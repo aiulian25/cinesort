@@ -10,7 +10,7 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields as dataclass_fields
 
 
 def _common_ancestor(a: Path, b: Path) -> Path:
@@ -57,6 +57,17 @@ class HistoryEntry:
     # "Undo all". Default None keeps pre-upgrade JSON loading unchanged.
     batch_id: Optional[str] = None
 
+    # ── What CineSort DECIDED, not just what it did. Without these the log is
+    # a bare from→to list: the title, provider, id and confidence that justified
+    # the rename were dropped a second after they were computed, so the history
+    # could not answer "why is this file called that?" — nor be re-applied under
+    # a new template without asking the provider all over again.
+    # All default None: a file written before this loads unchanged.
+    metadata: Optional[dict] = None
+    template: Optional[str] = None
+    confidence: Optional[float] = None
+    datasource: Optional[str] = None
+
 
 class RenameHistory:
     """Manages rename history with undo capability."""
@@ -88,12 +99,27 @@ class RenameHistory:
             pass  # unwritable location — _load() degrades to empty history
     
     def _load(self) -> List[HistoryEntry]:
-        """Load all history entries."""
+        """Load all history entries.
+
+        Unknown keys are dropped rather than raising. A file written by a NEWER
+        build would otherwise make HistoryEntry(**entry) throw, the except below
+        return [], and the next add_batch OVERWRITE the file with only its own
+        batch — silently destroying the user's audit trail on a downgrade.
+        """
         try:
             data = json.loads(self.history_file.read_text())
-            return [HistoryEntry(**entry) for entry in data]
         except Exception:
             return []
+        fields = {f.name for f in dataclass_fields(HistoryEntry)}
+        entries = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                entries.append(HistoryEntry(**{k: v for k, v in entry.items() if k in fields}))
+            except TypeError:
+                continue   # missing a required field — skip the row, keep the rest
+        return entries
     
     def _save(self, entries: List[HistoryEntry]):
         """Save all history entries."""
@@ -153,7 +179,7 @@ class RenameHistory:
         orig = Path(op.original)
 
         # ── copy / hardlink / symlink: undo = delete the created destination ──
-        if op.action in ("copy", "hardlink", "symlink"):
+        if op.action in ("copy", "reflink", "hardlink", "symlink"):
             # is_symlink() first: a dangling symlink fails exists().
             if not (dest.is_symlink() or dest.exists()):
                 return False, f"Destination no longer exists: {dest.name}"

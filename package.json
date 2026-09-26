@@ -41,7 +41,7 @@
       "depends": [
         "libgtk-3-0", "libnotify4", "libnss3",
         "libxss1", "libxtst6", "xdg-utils",
-        "libatspi2.0-0", "libuuid1", "python3",
+        "libatspi2.0-0", "libuuid1", "python3", "python3-venv",
         "libayatana-appindicator3-1"
       ],
       "afterInstall": "build/postinst.sh",
@@ -51,7 +51,7 @@
       "depends": [
         "gtk3", "libnotify", "nss",
         "libXScrnSaver", "libXtst", "xdg-utils",
-        "at-spi2-core", "libuuid", "python3",
+        "at-spi2-core", "libuuid", "python3", "python3-pip",
         "libayatana-appindicator-gtk3"
       ],
       "afterInstall": "build/postinst.sh",

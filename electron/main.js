@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray, clipboard } = require("electron");
-const { spawn, execFileSync } = require("child_process");
+const { spawn, spawnSync, execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -508,6 +508,37 @@ function runCmd(cmd, args) {
 }
 
 /**
+ * Debian, Ubuntu and friends ship `ensurepip` in a separate package
+ * (python3-venv), so `python3 -m venv` there produces a venv with no pip and
+ * the install step fails with an error that looks like a network problem.
+ * The .deb declares python3-venv, but users on other distros (or installing
+ * the AppImage) can still hit it, so check before we try.
+ */
+function pythonHasEnsurepip(pyPath) {
+    try {
+        return spawnSync(pyPath, ["-c", "import ensurepip"], { timeout: 10000 }).status === 0;
+    } catch {
+        return false;
+    }
+}
+
+/** The package to install, named for whatever package manager this host has. */
+function venvPackageHint() {
+    const managers = [
+        ["/usr/bin/apt-get", "sudo apt install python3-venv"],
+        ["/usr/bin/dnf",     "sudo dnf install python3-pip"],
+        ["/usr/bin/zypper",  "sudo zypper install python3-pip"],
+        ["/usr/bin/pacman",  "sudo pacman -S python-pip"],
+    ];
+    const found = managers.find(([bin]) => fs.existsSync(bin));
+    return found ? found[1] : "install your distribution's python3-venv (or python3-pip) package";
+}
+
+// Set when venv creation is impossible rather than merely failing, so the
+// dialog can tell the user what to install instead of blaming the network.
+let venvBlockedReason = null;
+
+/**
  * Create (or verify) a user-local venv at ~/.local/share/cinesort/venv
  * using `sysPyPath` and install from the bundled requirements.txt.
  * Returns the path to the venv's python3, or null on failure.
@@ -531,6 +562,15 @@ async function ensureUserVenv(sysPyPath) {
     const reqFile = path.join(process.resourcesPath, "requirements.txt");
     if (!fs.existsSync(reqFile)) {
         console.error("[main] requirements.txt not found in resources — cannot build user venv");
+        return null;
+    }
+
+    if (!pythonHasEnsurepip(sysPyPath)) {
+        venvBlockedReason =
+            `${sysPyPath} cannot create virtual environments: the "ensurepip" module ` +
+            `is missing, which on Debian, Ubuntu and derivatives means the python3-venv ` +
+            `package is not installed.\n\nInstall it and relaunch CineSort:\n  ${venvPackageHint()}`;
+        console.error(`[main] ${venvBlockedReason}`);
         return null;
     }
 
@@ -683,17 +723,23 @@ async function findOrCreatePython() {
 
     const userPython = await ensureUserVenv(sysPy.path);
     if (!userPython) {
+        // Install from the bundled requirements.txt, never bare package names:
+        // unpinned, pip can resolve pydantic 1.x next to a FastAPI that needs
+        // pydantic 2 ("cannot import name 'TypeAdapter'").
+        const reqFile = path.join(process.resourcesPath, "requirements.txt");
+        const detail = venvBlockedReason ||
+            `Python ${sysPy.minor} was found at ${sysPy.path} but installing ` +
+            "the required packages failed.\n\n" +
+            "Check your internet connection and try relaunching CineSort.\n" +
+            "If the problem persists, run:\n" +
+            `  rm -rf ~/.local/share/cinesort/venv\n` +
+            `  python3 -m venv ~/.local/share/cinesort/venv\n` +
+            `  ~/.local/share/cinesort/venv/bin/pip install --resume-retries 10 -r ${reqFile}`;
         await dialog.showMessageBox({
             type: "error",
             title: "Setup failed",
             message: "CineSort could not set up its Python environment.",
-            detail:
-                `Python ${sysPy.minor} was found at ${sysPy.path} but installing ` +
-                "the required packages failed.\n\n" +
-                "Check your internet connection and try relaunching CineSort.\n" +
-                "If the problem persists, run:\n" +
-                `  python3 -m venv ~/.local/share/cinesort/venv\n` +
-                `  ~/.local/share/cinesort/venv/bin/pip install fastapi uvicorn httpx pydantic`,
+            detail,
             buttons: ["Quit"],
         });
         app.quit();

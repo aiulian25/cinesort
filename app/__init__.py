@@ -9,4 +9,4 @@ Bump together with package.json (electron-builder's source, which cannot import
 Python) and the README badge; tests/test_version.py fails when they disagree.
 """
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"

@@ -7,7 +7,7 @@ CineSort automatically detects, matches, and renames your movies, TV shows, and 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/aiulian25/cinesort)
 ![Docker Image Size](https://img.shields.io/docker/image-size/aiulian25/cinesort/latest)
-![Version](https://img.shields.io/badge/version-1.6.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.6.1-green.svg)
 
 ---
 
@@ -102,20 +102,20 @@ Every format ships for both **x86_64** (`amd64`/`x86_64`) and **arm64** (`arm64`
 
 **Debian / Ubuntu:**
 ```bash
-sudo dpkg -i cinesort_1.6.0_amd64.deb # arm64: cinesort_1.6.0_arm64.deb
+sudo dpkg -i cinesort_1.6.1_amd64.deb # arm64: cinesort_1.6.1_arm64.deb
 cinesort # or launch from your application menu
 ```
 
 **Fedora / RHEL / openSUSE:**
 ```bash
-sudo dnf install ./cinesort-1.6.0.x86_64.rpm # arm64: cinesort-1.6.0.aarch64.rpm
+sudo dnf install ./cinesort-1.6.1.x86_64.rpm # arm64: cinesort-1.6.1.aarch64.rpm
 cinesort
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x CineSort-1.6.0.AppImage # arm64: CineSort-1.6.0-arm64.AppImage
-./CineSort-1.6.0.AppImage
+chmod +x CineSort-1.6.1.AppImage # arm64: CineSort-1.6.1-arm64.AppImage
+./CineSort-1.6.1.AppImage
 ```
 On first launch the app **automatically** installs itself into your application launcher (writes a `.desktop` entry and all icon sizes). No installer script needed — just double-click or right-click → Open.
 
@@ -535,7 +535,7 @@ docker exec cinesort python -m app.cli rename /media/incoming --yes --json
 cinesort-cli match ~/Downloads
 
 # AppImage
-./CineSort-1.6.0.AppImage --cli match ~/Downloads
+./CineSort-1.6.1.AppImage --cli match ~/Downloads
 ```
 
 `CINESORT_SCOPE_TO_BROWSE_ROOTS=1` confines the CLI to the same allow-list it confines the HTTP API to — it is not a way around that setting.
@@ -751,6 +751,15 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v1.6.1
+
+A packaging fix for the desktop app on Linux; nothing changes for Docker.
+
+- **First launch no longer fails on Debian, Ubuntu and derivatives** without `python3-venv`. When the bundled Python environment doesn't match the system's Python, CineSort builds its own — which needs `ensurepip`, and Debian ships that separately from `python3`. Without it the setup failed and the dialog blamed the internet connection. The `.deb` now depends on `python3-venv` and the `.rpm` on `python3-pip`, so the package manager installs it.
+- **A clear message when it's still missing** — the AppImage can't declare dependencies, so CineSort now checks before building the environment and names the exact package to install for your package manager (apt, dnf, zypper, pacman).
+- **The manual recovery steps no longer install a broken combination.** They used to `pip install` packages by name, which could resolve pydantic 1 beside a FastAPI that needs pydantic 2 and then die at startup with `cannot import name 'TypeAdapter'`. They now install from the bundled, pinned `requirements.txt`, with resumable downloads for slow connections.
+- **Bundled Python moves to 3.14.** Ubuntu 26.04, Fedora 42+ and Arch start instantly; on Ubuntu 24.04 and Debian 13 the installer rebuilds the environment for your Python once, which takes about 30 seconds and needs a network connection.
 
 ### v1.6.0
 

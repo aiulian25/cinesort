@@ -10,7 +10,7 @@
   "homepage": "https://github.com/cinesort/cinesort",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --linux",
+    "build": "PATH=\"$(ruby -e 'print Gem.user_dir' 2>/dev/null)/bin:$PATH\"; command -v fpm >/dev/null && export USE_SYSTEM_FPM=true; electron-builder --linux",
     "docker:build": "docker build --build-arg PYTHON_VERSION=3.11 --build-arg APP_VERSION=$npm_package_version -t cinesort:latest -t cinesort:$npm_package_version .",
     "docker:setup": "[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ] || docker run --rm --privileged tonistiigi/binfmt --install arm64; docker buildx inspect cinesort-builder >/dev/null 2>&1 || docker buildx create --name cinesort-builder --driver docker-container --bootstrap",
     "docker:release": "npm run docker:setup && docker buildx build --builder cinesort-builder --platform linux/amd64,linux/arm64 --build-arg PYTHON_VERSION=3.11 --build-arg APP_VERSION=$npm_package_version -t aiulian25/cinesort:$npm_package_version -t aiulian25/cinesort:latest --push .",

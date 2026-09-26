@@ -730,8 +730,10 @@ docker compose -f docker-compose.dev.yml up -d
 **Desktop build:**
 ```bash
 npm install
-npm run build # produces .deb and AppImage in dist/
+npm run build # produces .deb, .rpm and AppImage (x64 + arm64) in dist/
 ```
+
+The `.rpm` needs `rpmbuild` (`sudo apt install rpm`). On hosts with RPM 4.20 or newer (Ubuntu 26.04+, Fedora 41+), electron-builder's bundled fpm stages files where rpmbuild no longer looks and the rpm targets fail with `File not found: …/BUILDROOT/…`. Install a current fpm with `gem install --user-install fpm`; `npm run build` uses it automatically when it is present.
 
 ---
 
